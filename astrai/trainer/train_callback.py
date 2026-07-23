@@ -14,8 +14,8 @@ from tqdm import tqdm
 
 from astrai.factory import BaseFactory
 from astrai.parallel import only_on_rank
-from astrai.parallel.setup import get_current_device
-from astrai.serialization import Checkpoint
+from astrai.parallel.setup import get_current_device, get_rank
+from astrai.serialization import Checkpoint, save_torch
 from astrai.trainer.metric_util import (
     ctx_get_expert_load_cv,
     ctx_get_expert_load_max,
@@ -156,12 +156,20 @@ class CheckpointCallback(TrainCallback):
         self.last_ckpt_step = context.optimizer_step
 
         with context.executor.checkpoint_context(context.model) as state_dict:
-            if state_dict is not None:
-                save_path = os.path.join(
-                    self.save_dir,
-                    f"epoch_{context.epoch}_step_{context.optimizer_step}",
+            save_path = os.path.join(
+                self.save_dir,
+                f"epoch_{context.epoch}_step_{context.optimizer_step}",
+            )
+            if context.executor.use_distributed and context.optimizer is not None:
+                Path(save_path).mkdir(parents=True, exist_ok=True)
+                save_torch(
+                    context.optimizer.state_dict(),
+                    Path(save_path) / f"optimizer.rank{get_rank()}.pt",
                 )
+            if state_dict is not None:
                 extra = self.save_extra_fn(context)
+                if context.executor.use_distributed:
+                    extra.pop("optimizer", None)
                 meta = context.config.to_dict()
                 context.checkpoint = Checkpoint(
                     state_dict=state_dict,

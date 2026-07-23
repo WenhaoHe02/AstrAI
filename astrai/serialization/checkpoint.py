@@ -168,8 +168,13 @@ class Checkpoint:
         state_dict = load_state_dict(save_path / _WEIGHTS_FILE, broadcast=broadcast)
 
         extra = {}
+        rank_optimizer = save_path / f"optimizer.rank{get_rank()}.pt"
+        if rank_optimizer.exists():
+            extra["optimizer"] = load_torch(rank_optimizer, broadcast=False)
         for f in sorted(save_path.iterdir()):
             if f.suffix == ".pt":
+                if f.name.startswith("optimizer.rank"):
+                    continue
                 extra[f.stem] = load_torch(f, broadcast=broadcast)
 
         return cls(
