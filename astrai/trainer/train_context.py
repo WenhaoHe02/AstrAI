@@ -166,6 +166,11 @@ class TrainContextBuilder:
             start_iter=sampler_offset,
             seed=cfg.random_seed,
         )
+        # A checkpoint taken on the final batch still records the current
+        # epoch number. RDSampler normalizes the cumulative sample offset and
+        # may therefore advance to the next epoch; keep the outer trainer loop
+        # aligned so a resumed run neither replays nor adds an extra epoch.
+        context.epoch = max(context.epoch, sampler.epoch)
         context.dataloader = DataLoader(
             train_dataset,
             batch_size=cfg.batch_per_device,

@@ -51,3 +51,26 @@ def test_sampler_across_epochs(random_dataset):
     # Check that all indices are present in each epoch
     assert set(epoch1_indices) == set(range(n))
     assert set(epoch2_indices) == set(range(n))
+
+
+def test_resume_at_epoch_boundary_advances_epoch(random_dataset):
+    n = len(random_dataset)
+    resumed = RDSampler(random_dataset, start_epoch=0, start_iter=n, seed=42)
+    epoch_two = RDSampler(random_dataset, start_epoch=1, seed=42)
+
+    assert resumed.epoch == 1
+    assert list(resumed) == list(epoch_two)
+
+
+def test_resume_mid_later_epoch_preserves_offset(random_dataset):
+    n = len(random_dataset)
+    full_epoch = list(RDSampler(random_dataset, start_epoch=3, seed=42))
+    resumed = RDSampler(
+        random_dataset,
+        start_epoch=3,
+        start_iter=3 * n + 2,
+        seed=42,
+    )
+
+    assert resumed.epoch == 3
+    assert list(resumed) == full_epoch[2:]

@@ -51,7 +51,11 @@ class RDSampler(Sampler[int]):
         offset = 0 if drop_last else self.num_replicas - 1
         self.num_samples_per_replica = (self.num_samples + offset) // self.num_replicas
         self.total_size = self.num_samples_per_replica * self.num_replicas
-        self.iter = self.iter % self.num_samples_per_replica
+        if self.num_samples_per_replica > 0:
+            completed_epochs, self.iter = divmod(
+                self.iter, self.num_samples_per_replica
+            )
+            self.epoch = max(self.epoch, completed_epochs)
 
         self._indices = None
 
@@ -69,7 +73,8 @@ class RDSampler(Sampler[int]):
 
         local_indices = indices[self.rank : self.total_size : self.num_replicas]
 
-        self.iter = self.iter % self.num_samples_per_replica
+        if self.num_samples_per_replica > 0:
+            self.iter = self.iter % self.num_samples_per_replica
         self._indices = local_indices[self.iter :]
 
     def __iter__(self):
