@@ -285,6 +285,23 @@ class CacheView(ABC):
     @abstractmethod
     def gather(self, layer_id: int) -> Tuple[Tensor, Tensor]: ...
 
+    def attend(
+        self,
+        layer_id: int,
+        q: Tensor,
+        mask: Optional[Tensor] = None,
+        causal_offset: int = -1,
+        scale: float = 0.0,
+    ) -> Optional[Tensor]:
+        """Run cache-native single-token attention when supported.
+
+        ``q`` uses BLHD layout.  The default keeps third-party cache views
+        backward compatible and lets the model fall back to ``gather`` plus
+        SDPA.  Concrete cache views override this for the split-KV decode
+        kernels, which intentionally have no autograd implementation.
+        """
+        return None
+
 
 class KVCache(ABC):
     """Abstract KV-cache facade for scheduler/executor."""
@@ -329,6 +346,31 @@ class PageCacheView(CacheView):
 
     def gather(self, layer_id: int) -> Tuple[Tensor, Tensor]:
         return self._storage.gather(layer_id, self._page_table, self._total_len)
+
+    def attend(
+        self,
+        layer_id: int,
+        q: Tensor,
+        mask: Optional[Tensor] = None,
+        causal_offset: int = -1,
+        scale: float = 0.0,
+    ) -> Optional[Tensor]:
+        if q.size(1) != 1 or torch.is_grad_enabled():
+            return None
+        from astrai.extension import attn_paged_decode
+
+        return attn_paged_decode(
+            q,
+            self._page_table,
+            self._storage.k_cache[layer_id],
+            self._storage.v_cache[layer_id],
+            self._storage.page_size,
+            self._total_len,
+            mask=mask,
+            causal_offset=causal_offset,
+            scale=scale,
+            layout="blhd",
+        )
 
 
 class PageCache(KVCache):
@@ -446,6 +488,29 @@ class ContiguousCacheView(CacheView):
         k = self._cache.k[layer_id, indices, :max_len]
         v = self._cache.v[layer_id, indices, :max_len]
         return k, v
+
+    def attend(
+        self,
+        layer_id: int,
+        q: Tensor,
+        mask: Optional[Tensor] = None,
+        causal_offset: int = -1,
+        scale: float = 0.0,
+    ) -> Optional[Tensor]:
+        if q.size(1) != 1 or torch.is_grad_enabled():
+            return None
+        from astrai.extension import attn_decode
+
+        k, v = self.gather(layer_id)
+        return attn_decode(
+            q,
+            k,
+            v,
+            mask=mask,
+            causal_offset=causal_offset,
+            scale=scale,
+            layout="blhd",
+        )
 
 
 class ContiguousCache(KVCache):

@@ -1,4 +1,6 @@
 import torch
+import torch.distributed as dist
+import torch.distributed.nn.functional as dist_nn
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
@@ -25,6 +27,144 @@ class MLP(nn.Module):
         return out
 
 
+_EP_GROUP_CACHE: dict[tuple[int, int], tuple[object, int]] = {}
+
+
+def _expert_parallel_group(size: int):
+    """Return this rank's contiguous expert-parallel group and local rank."""
+    if size == 1:
+        return None, 0
+    if not dist.is_available() or not dist.is_initialized():
+        raise RuntimeError(
+            "expert_parallel_size > 1 requires an initialized process group"
+        )
+    world_size = dist.get_world_size()
+    if world_size % size != 0:
+        raise ValueError(
+            f"world_size ({world_size}) must be divisible by "
+            f"expert_parallel_size ({size})"
+        )
+
+    key = (world_size, size)
+    cached = _EP_GROUP_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    global_rank = dist.get_rank()
+    selected = None
+    for start in range(0, world_size, size):
+        ranks = list(range(start, start + size))
+        group = dist.new_group(ranks=ranks)
+        if global_rank in ranks:
+            selected = (group, global_rank - start)
+    assert selected is not None
+    _EP_GROUP_CACHE[key] = selected
+    return selected
+
+
+class GroupedExperts(nn.Module):
+    """Jagged grouped-GEMM experts, optionally sharded by expert rank."""
+
+    def __init__(
+        self,
+        dim: int,
+        dim_ffn: int,
+        n_experts: int,
+        down_init_std: float,
+        expert_parallel_size: int = 1,
+    ):
+        super().__init__()
+        if n_experts % expert_parallel_size != 0:
+            raise ValueError(
+                f"n_routed_experts ({n_experts}) must be divisible by "
+                f"expert_parallel_size ({expert_parallel_size})"
+            )
+        self.dim = dim
+        self.dim_ffn = dim_ffn
+        self.n_experts = n_experts
+        self.expert_parallel_size = expert_parallel_size
+        self.process_group, self.expert_parallel_rank = _expert_parallel_group(
+            expert_parallel_size
+        )
+        self.n_local_experts = n_experts // expert_parallel_size
+        self.expert_start = self.expert_parallel_rank * self.n_local_experts
+        self.expert_end = self.expert_start + self.n_local_experts
+        self.down_init_std = down_init_std
+
+        self.up_weight = nn.Parameter(
+            torch.empty(self.n_local_experts, dim_ffn, dim)
+        )
+        self.gate_weight = nn.Parameter(
+            torch.empty(self.n_local_experts, dim_ffn, dim)
+        )
+        self.down_weight = nn.Parameter(
+            torch.empty(self.n_local_experts, dim, dim_ffn)
+        )
+
+        # FSDP discovers this marker and leaves rank-local expert weights out
+        # of data-parallel sharding.  Shared/router/attention parameters still
+        # use full sharding.
+        self._expert_parallel_local = expert_parallel_size > 1
+
+    def reset_parameters(self):
+        nn.init.normal_(self.up_weight, mean=0.0, std=0.02)
+        nn.init.normal_(self.gate_weight, mean=0.0, std=0.02)
+        nn.init.normal_(self.down_weight, mean=0.0, std=self.down_init_std)
+
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
+        # Checkpoints store global expert tensors.  Each EP rank loads only
+        # its contiguous expert slice before FSDP wrapping.
+        for name in ("up_weight", "gate_weight", "down_weight"):
+            key = prefix + name
+            value = state_dict.get(key)
+            if value is not None and value.size(0) == self.n_experts:
+                state_dict[key] = value[self.expert_start : self.expert_end]
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
+
+    @staticmethod
+    def _grouped_mm(x: Tensor, weight: Tensor, offsets: Tensor) -> Tensor:
+        grouped_mm = getattr(F, "grouped_mm", None)
+        if grouped_mm is not None and x.is_cuda and x.dtype == torch.bfloat16:
+            return grouped_mm(x, weight, offs=offsets)
+        if hasattr(torch, "_grouped_mm") and x.is_cuda and x.dtype == torch.bfloat16:
+            return torch._grouped_mm(x, weight, offs=offsets)
+
+        # CPU/unsupported-dtype correctness fallback used by unit tests and
+        # tiny smoke checks. Production BF16 CUDA runs must take grouped_mm.
+        chunks = []
+        start = 0
+        for expert_idx, end in enumerate(offsets.tolist()):
+            chunks.append(F.linear(x[start:end], weight[expert_idx]))
+            start = end
+        if not chunks:
+            return x.new_empty((0, weight.size(1)))
+        return torch.cat(chunks, dim=0)
+
+    def forward(self, x: Tensor, counts: Tensor) -> Tensor:
+        offsets = counts.to(dtype=torch.int32).cumsum(0)
+        up = self._grouped_mm(x, self.up_weight, offsets)
+        gate = self._grouped_mm(x, self.gate_weight, offsets)
+        hidden = up * F.silu(gate)
+        return self._grouped_mm(hidden, self.down_weight, offsets)
+
+
 @FFNFactory.register("moe")
 class DeepSeekMoE(nn.Module):
     def __init__(
@@ -36,6 +176,7 @@ class DeepSeekMoE(nn.Module):
         n_activated_experts: int = 2,
         topk_method: str = "greedy",
         n_layers: int = 1,
+        expert_parallel_size: int = 1,
     ):
         super().__init__()
         self.dim = dim
@@ -43,6 +184,7 @@ class DeepSeekMoE(nn.Module):
         self.n_shared_experts = n_shared_experts
         self.n_activated_experts = n_activated_experts
         self.topk_method = topk_method or "greedy"
+        self.expert_parallel_size = expert_parallel_size
 
         if self.topk_method != "greedy":
             raise ValueError(
@@ -63,11 +205,12 @@ class DeepSeekMoE(nn.Module):
                 for _ in range(n_shared_experts)
             ]
         )
-        self.routed_experts = nn.ModuleList(
-            [
-                MLP(dim, dim_ffn, down_init_std=down_init_std)
-                for _ in range(n_routed_experts)
-            ]
+        self.routed_experts = GroupedExperts(
+            dim,
+            dim_ffn,
+            n_routed_experts,
+            down_init_std=down_init_std,
+            expert_parallel_size=expert_parallel_size,
         )
 
     def forward(self, x: Tensor):
@@ -116,16 +259,25 @@ class DeepSeekMoE(nn.Module):
             dim=-1,
         ).mean()
 
+        token_idx = torch.arange(N, device=x.device).repeat_interleave(K)
+        expert_idx = topk_indices.reshape(-1)
+        assignment_weights = topk_weights.reshape(-1)
+
+        if self.expert_parallel_size > 1:
+            assignment_output = self._expert_parallel_forward(
+                x[token_idx], expert_idx
+            )
+        else:
+            assignment_output = self._local_grouped_forward(
+                x[token_idx], expert_idx
+            )
+
         output = torch.zeros(N, D, device=x.device, dtype=x.dtype)
-        for expert_idx in range(self.n_routed_experts):
-            expert_mask = topk_indices == expert_idx
-            token_idx, k_idx = expert_mask.nonzero(as_tuple=True)
-            if token_idx.numel() == 0:
-                continue
-            expert_input = x[token_idx]
-            expert_output = self.routed_experts[expert_idx](expert_input)
-            weights = topk_weights[token_idx, k_idx].unsqueeze(-1)
-            output.index_add_(0, token_idx, expert_output * weights)
+        output.index_add_(
+            0,
+            token_idx,
+            assignment_output * assignment_weights.unsqueeze(-1),
+        )
 
         return (
             output,
@@ -134,3 +286,66 @@ class DeepSeekMoE(nn.Module):
             expert_load.detach(),
             router_entropy.detach(),
         )
+
+    def _local_grouped_forward(self, assignment_x: Tensor, expert_idx: Tensor):
+        order = torch.argsort(expert_idx, stable=True)
+        grouped_x = assignment_x[order]
+        counts = torch.bincount(expert_idx, minlength=self.n_routed_experts)
+        grouped_out = self.routed_experts(grouped_x, counts)
+        output = torch.empty_like(grouped_out)
+        output[order] = grouped_out
+        return output
+
+    def _expert_parallel_forward(self, assignment_x: Tensor, expert_idx: Tensor):
+        ep_size = self.expert_parallel_size
+        n_local = self.routed_experts.n_local_experts
+        destination = torch.div(expert_idx, n_local, rounding_mode="floor")
+        send_order = torch.argsort(destination, stable=True)
+        send_x = assignment_x[send_order].contiguous()
+        send_local_expert = (expert_idx[send_order] % n_local).contiguous()
+        send_counts = torch.bincount(destination, minlength=ep_size).to(torch.int64)
+
+        recv_counts = torch.empty_like(send_counts)
+        dist.all_to_all_single(
+            recv_counts,
+            send_counts,
+            group=self.routed_experts.process_group,
+        )
+        send_splits = send_counts.cpu().tolist()
+        recv_splits = recv_counts.cpu().tolist()
+        recv_total = sum(recv_splits)
+
+        recv_x_buffer = send_x.new_empty((recv_total, send_x.size(1)))
+        recv_x = dist_nn.all_to_all_single(
+            recv_x_buffer,
+            send_x,
+            output_split_sizes=recv_splits,
+            input_split_sizes=send_splits,
+            group=self.routed_experts.process_group,
+        )
+        recv_expert = send_local_expert.new_empty(recv_total)
+        dist.all_to_all_single(
+            recv_expert,
+            send_local_expert,
+            output_split_sizes=recv_splits,
+            input_split_sizes=send_splits,
+            group=self.routed_experts.process_group,
+        )
+
+        recv_order = torch.argsort(recv_expert, stable=True)
+        counts = torch.bincount(recv_expert, minlength=n_local)
+        grouped_out = self.routed_experts(recv_x[recv_order], counts)
+        recv_out = torch.empty_like(grouped_out)
+        recv_out[recv_order] = grouped_out
+
+        returned_buffer = recv_out.new_empty(send_x.shape)
+        returned = dist_nn.all_to_all_single(
+            returned_buffer,
+            recv_out,
+            output_split_sizes=send_splits,
+            input_split_sizes=recv_splits,
+            group=self.routed_experts.process_group,
+        )
+        assignment_output = torch.empty_like(returned)
+        assignment_output[send_order] = returned
+        return assignment_output

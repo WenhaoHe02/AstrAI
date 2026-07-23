@@ -283,6 +283,21 @@ class FSDPExecutor(BaseExecutor):
             logger.warning("FSDP backend selected but world_size=1, model not wrapped")
             return model
         self._original_model = model
+        local_expert_modules = [
+            module
+            for module in model.modules()
+            if getattr(module, "_expert_parallel_local", False)
+        ]
+        if local_expert_modules:
+            configured = list(self._fsdp_kwargs.get("ignored_modules", []))
+            self._fsdp_kwargs["ignored_modules"] = [
+                *configured,
+                *local_expert_modules,
+            ]
+            logger.info(
+                "FSDP excluding %d rank-local grouped-expert modules",
+                len(local_expert_modules),
+            )
         device_id = torch.device("cuda", get_rank())
         model = FSDP(model, device_id=device_id, **self._fsdp_kwargs)
         logger.info("Model wrapped with FSDP (world_size=%d)", get_world_size())
@@ -308,7 +323,26 @@ class FSDPExecutor(BaseExecutor):
                 StateDictType.FULL_STATE_DICT,
                 FullStateDictConfig(offload_to_cpu=True, rank0_only=True),
             ):
-                return model.state_dict()
+                state_dict = model.state_dict()
+
+            # Ignored EP experts are rank-local and therefore are not part of
+            # FSDP's full-state gather. Reconstruct their global leading
+            # expert dimension so checkpoints remain portable to EP=1.
+            for module_name, module in self._original_model.named_modules():
+                if not getattr(module, "_expert_parallel_local", False):
+                    continue
+                if module.expert_parallel_size != get_world_size():
+                    raise RuntimeError(
+                        "checkpoint gathering currently requires "
+                        "expert_parallel_size == world_size"
+                    )
+                for param_name, param in module.named_parameters(recurse=False):
+                    gathered = [torch.empty_like(param) for _ in range(get_world_size())]
+                    dist.all_gather(gathered, param.detach(), group=module.process_group)
+                    if get_rank() == 0:
+                        key = f"{module_name}.{param_name}"
+                        state_dict[key] = torch.cat(gathered, dim=0).cpu()
+            return state_dict
 
         return model.state_dict()
 

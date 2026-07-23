@@ -88,6 +88,23 @@ class GQA(nn.Module):
 
         if paged_cache is not None:
             paged_cache.write(self.layer_id, k, v)
+
+            # Decode kernels use split-KV parallelism.  A PageCacheView also
+            # reads the page table directly, avoiding a full contiguous KV
+            # gather.  These forward-only kernels are inference-only; cache
+            # views return None while autograd is enabled.
+            cache_out = paged_cache.attend(
+                self.layer_id,
+                q,
+                mask=attn_mask,
+                causal_offset=-1,
+            )
+            if cache_out is not None:
+                sdqa_out = cache_out.contiguous().flatten(2)
+                if self.use_gated_attention:
+                    sdqa_out = sdqa_out * F.sigmoid(self.gate(x))
+                return self.o_proj(sdqa_out)
+
             k, v = paged_cache.gather(self.layer_id)
 
         q, k, v = q.permute(0, 2, 1, 3), k.permute(0, 2, 1, 3), v.permute(0, 2, 1, 3)

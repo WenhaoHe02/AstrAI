@@ -4,6 +4,7 @@ import torch
 
 from astrai.inference import (
     Allocator,
+    ContiguousCache,
     PageCache,
     PagePool,
     PrefixCache,
@@ -277,3 +278,63 @@ def test_storage_gather_clamps_negative_padding():
     page_table = torch.tensor([[0, -1]], dtype=torch.long)
     gk, gv = storage.gather(0, page_table, 4)
     assert gk.shape == (1, 4, 2, 8)
+
+
+def test_page_cache_view_dispatches_paged_decode(monkeypatch):
+    import astrai.extension as extension
+
+    cache = PageCache(
+        n_layers=1,
+        n_pages=4,
+        page_size=4,
+        n_kv_heads=1,
+        head_dim=8,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
+    assert cache.task_alloc("task", [1, 2, 3, 4])
+    view = cache.bind_tasks(["task"], total_len=4, device=torch.device("cpu"))
+    q = torch.randn(1, 1, 2, 8)
+    expected = torch.randn_like(q)
+    called = {}
+
+    def fake_paged(q_arg, page_table, k_cache, v_cache, page_size, kv_len, **kw):
+        called.update(page_size=page_size, kv_len=kv_len, layout=kw["layout"])
+        return expected
+
+    monkeypatch.setattr(extension, "attn_paged_decode", fake_paged)
+    with torch.no_grad():
+        result = view.attend(0, q)
+
+    assert result is expected
+    assert called == {"page_size": 4, "kv_len": 4, "layout": "blhd"}
+
+
+def test_contiguous_cache_view_dispatches_split_kv_decode(monkeypatch):
+    import astrai.extension as extension
+
+    cache = ContiguousCache(
+        n_layers=1,
+        max_batch_size=1,
+        max_seq_len=8,
+        n_kv_heads=1,
+        head_dim=8,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
+    assert cache.task_alloc("task", [])
+    view = cache.bind_tasks(["task"], total_len=1, device=torch.device("cpu"))
+    q = torch.randn(1, 1, 2, 8)
+    expected = torch.randn_like(q)
+    called = {}
+
+    def fake_decode(q_arg, k, v, **kw):
+        called.update(k_shape=tuple(k.shape), layout=kw["layout"])
+        return expected
+
+    monkeypatch.setattr(extension, "attn_decode", fake_decode)
+    with torch.no_grad():
+        result = view.attend(0, q)
+
+    assert result is expected
+    assert called == {"k_shape": (1, 1, 1, 8), "layout": "blhd"}

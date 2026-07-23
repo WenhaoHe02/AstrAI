@@ -4,6 +4,7 @@ This recipe defines a 12.155B-total, 3.171B-active decoder model:
 
 - 32 layers, hidden size 3072, 24 query heads, one KV head (MQA)
 - 16 routed experts, one shared expert, top-2 routing
+- 8-way expert parallelism (two routed experts per H200) with grouped GEMM
 - expert intermediate size 2176
 - 100K vocabulary with untied input/output embeddings
 - 2048-token bulk pretraining windows; the model retains a 32K RoPE limit for a later context-extension stage
@@ -32,7 +33,7 @@ Start with a tiny processed shard before using the complete corpus:
 ```bash
 python scripts/tools/train.py \
   --nprocs=8 \
-  --parallel_mode=ddp \
+  --parallel_mode=fsdp \
   --train_type=seq \
   --data_root_path=data-bin/smoke-2048 \
   --param_path=params/astrai-12b-mqa-moe \
