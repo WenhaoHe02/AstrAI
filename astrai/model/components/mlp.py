@@ -142,9 +142,9 @@ class GroupedExperts(nn.Module):
     def _grouped_mm(x: Tensor, weight: Tensor, offsets: Tensor) -> Tensor:
         grouped_mm = getattr(F, "grouped_mm", None)
         if grouped_mm is not None and x.is_cuda and x.dtype == torch.bfloat16:
-            return grouped_mm(x, weight, offs=offsets)
+            return grouped_mm(x, weight.transpose(1, 2), offs=offsets)
         if hasattr(torch, "_grouped_mm") and x.is_cuda and x.dtype == torch.bfloat16:
-            return torch._grouped_mm(x, weight, offs=offsets)
+            return torch._grouped_mm(x, weight.transpose(1, 2), offs=offsets)
 
         # CPU/unsupported-dtype correctness fallback used by unit tests and
         # tiny smoke checks. Production BF16 CUDA runs must take grouped_mm.
