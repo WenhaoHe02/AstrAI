@@ -46,11 +46,12 @@ en_minhash_pid=$launched_pid
 launch "$log_root/balance-full.log" \
     "$curation_python" scripts/data/wait_and_run.py --pid "$zh_minhash_pid" -- \
     "$curation_python" scripts/data/wait_and_run.py --pid "$en_minhash_pid" -- \
+    /usr/bin/env RAYON_NUM_THREADS=12 TOKENIZERS_PARALLELISM=true \
     "$curation_python" scripts/data/balance_pretrain.py \
     --zh /mnt/nvme4/astrai/dedup/zh --en /mnt/nvme4/astrai/dedup/en \
     --tokenizer params/astrai-12b-mqa-moe/tokenizer.json \
     --output /mnt/nvme3/astrai/normalized/pretrain-balanced.jsonl \
-    --tokens-per-language auto --batch-size 512
+    --tokens-per-language auto --batch-size 512 --index-workers 8
 balance_pid=$launched_pid
 
 launch "$log_root/preprocess-full.log" \

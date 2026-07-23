@@ -4,8 +4,11 @@ import argparse
 import gzip
 import json
 import os
+import shutil
 import struct
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextlib import ExitStack
+from multiprocessing import get_context
 from pathlib import Path
 from typing import Iterator, TextIO
 
@@ -13,6 +16,7 @@ from tokenizers import Tokenizer
 
 
 TOKEN_COUNT = struct.Struct("<Q")
+_INDEX_TOKENIZER: Tokenizer | None = None
 
 
 def open_text(path: Path, mode: str) -> TextIO:
@@ -103,6 +107,77 @@ def write_token_index(
     return total
 
 
+def _init_index_worker(tokenizer_path: str) -> None:
+    global _INDEX_TOKENIZER
+    _INDEX_TOKENIZER = Tokenizer.from_file(tokenizer_path)
+
+
+def _write_index_part(
+    task: tuple[int, Path, int, Path],
+) -> tuple[int, int]:
+    ordinal, source, batch_size, part = task
+    if _INDEX_TOKENIZER is None:
+        raise RuntimeError("token index worker was not initialized")
+    total = write_token_index([source], _INDEX_TOKENIZER, batch_size, part)
+    return ordinal, total
+
+
+def write_token_index_parallel(
+    paths: list[Path],
+    tokenizer_path: str,
+    batch_size: int,
+    output: Path,
+    workers: int,
+) -> int:
+    """Build per-file indexes concurrently, then concatenate in source order."""
+
+    if workers <= 1 or len(paths) <= 1:
+        tokenizer = Tokenizer.from_file(tokenizer_path)
+        return write_token_index(paths, tokenizer, batch_size, output)
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    parts_dir = output.with_name(output.name + ".parts")
+    parts_dir.mkdir(parents=True, exist_ok=True)
+    part_paths = [parts_dir / f"{ordinal:05d}.u64" for ordinal in range(len(paths))]
+    tasks = [
+        (ordinal, source, batch_size, part_paths[ordinal])
+        for ordinal, source in enumerate(paths)
+    ]
+    totals = [0] * len(tasks)
+    temporary = output.with_name(output.name + ".tmp")
+    try:
+        with ProcessPoolExecutor(
+            max_workers=min(workers, len(tasks)),
+            mp_context=get_context("spawn"),
+            initializer=_init_index_worker,
+            initargs=(tokenizer_path,),
+        ) as pool:
+            futures = [pool.submit(_write_index_part, task) for task in tasks]
+            for completed, future in enumerate(as_completed(futures), start=1):
+                ordinal, total = future.result()
+                totals[ordinal] = total
+                print(
+                    f"indexed {completed}/{len(tasks)} files: "
+                    f"{paths[ordinal].name} ({total:,} tokens)",
+                    flush=True,
+                )
+
+        with temporary.open("wb") as destination:
+            for part in part_paths:
+                with part.open("rb") as source:
+                    shutil.copyfileobj(source, destination, length=16 * 1024 * 1024)
+        os.replace(temporary, output)
+    finally:
+        temporary.unlink(missing_ok=True)
+        for part in part_paths:
+            part.unlink(missing_ok=True)
+        try:
+            parts_dir.rmdir()
+        except OSError:
+            pass
+    return sum(totals)
+
+
 def iter_indexed(
     paths: list[Path], index: Path
 ) -> Iterator[tuple[dict, int, None]]:
@@ -139,9 +214,17 @@ def main() -> None:
         help="Exact target per language, or 'auto' to use the smaller corpus",
     )
     parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument(
+        "--index-workers",
+        type=int,
+        default=1,
+        help="Processes used to build token-count indexes (default: 1)",
+    )
     args = parser.parse_args()
     if args.batch_size < 1:
         parser.error("--batch-size must be positive")
+    if args.index_workers < 1:
+        parser.error("--index-workers must be positive")
 
     tokenizer = Tokenizer.from_file(args.tokenizer)
     paths = {"zh": expand(args.zh), "en": expand(args.en)}
@@ -152,8 +235,12 @@ def main() -> None:
             for language in paths
         }
         available = {
-            language: write_token_index(
-                source_paths, tokenizer, args.batch_size, indexes[language]
+            language: write_token_index_parallel(
+                source_paths,
+                args.tokenizer,
+                args.batch_size,
+                indexes[language],
+                args.index_workers,
             )
             for language, source_paths in paths.items()
         }
