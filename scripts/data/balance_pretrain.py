@@ -46,17 +46,72 @@ def expand(patterns: list[str]) -> list[Path]:
     return paths
 
 
+def iter_tokenized(
+    paths: list[Path], tokenizer: Tokenizer, batch_size: int
+) -> Iterator[tuple[dict, list[int]]]:
+    batch: list[dict] = []
+    for item in iter_records(paths):
+        if item.get("text", "").strip():
+            batch.append(item)
+        if len(batch) < batch_size:
+            continue
+        encoded = tokenizer.encode_batch(
+            [item["text"] for item in batch], add_special_tokens=False
+        )
+        for record, encoding in zip(batch, encoded):
+            if encoding.ids:
+                yield record, encoding.ids
+        batch = []
+    if batch:
+        encoded = tokenizer.encode_batch(
+            [item["text"] for item in batch], add_special_tokens=False
+        )
+        for record, encoding in zip(batch, encoded):
+            if encoding.ids:
+                yield record, encoding.ids
+
+
+def count_tokens(paths: list[Path], tokenizer: Tokenizer, batch_size: int) -> int:
+    return sum(
+        len(token_ids)
+        for _, token_ids in iter_tokenized(paths, tokenizer, batch_size)
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--zh", nargs="+", required=True)
     parser.add_argument("--en", nargs="+", required=True)
     parser.add_argument("--tokenizer", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--tokens-per-language", type=int, required=True)
+    parser.add_argument(
+        "--tokens-per-language",
+        required=True,
+        help="Exact target per language, or 'auto' to use the smaller corpus",
+    )
+    parser.add_argument("--batch-size", type=int, default=256)
     args = parser.parse_args()
+    if args.batch_size < 1:
+        parser.error("--batch-size must be positive")
 
     tokenizer = Tokenizer.from_file(args.tokenizer)
-    streams = {"zh": iter_records(expand(args.zh)), "en": iter_records(expand(args.en))}
+    paths = {"zh": expand(args.zh), "en": expand(args.en)}
+    if args.tokens_per_language == "auto":
+        available = {
+            language: count_tokens(source_paths, tokenizer, args.batch_size)
+            for language, source_paths in paths.items()
+        }
+        target = min(available.values())
+        print(json.dumps({"available_tokens": available, "target": target}))
+    else:
+        target = int(args.tokens_per_language)
+    if target < 1:
+        raise SystemExit("token target must be positive")
+
+    streams = {
+        language: iter_tokenized(source_paths, tokenizer, args.batch_size)
+        for language, source_paths in paths.items()
+    }
     counts = {"zh": 0, "en": 0}
     docs = {"zh": 0, "en": 0}
     output = Path(args.output)
@@ -64,27 +119,20 @@ def main() -> None:
 
     with ExitStack() as stack:
         handle = stack.enter_context(open_text(output, "wt"))
-        while min(counts.values()) < args.tokens_per_language:
+        while min(counts.values()) < target:
             language = min(counts, key=counts.get)
             try:
-                item = next(streams[language])
+                item, token_ids = next(streams[language])
             except StopIteration as exc:
                 raise RuntimeError(
                     f"{language} exhausted at {counts[language]:,} tokens"
                 ) from exc
-            text = item.get("text", "")
-            if not text:
-                continue
-            length = len(tokenizer.encode(text, add_special_tokens=False).ids)
-            if not length:
-                continue
-            remaining = args.tokens_per_language - counts[language]
+            length = len(token_ids)
+            remaining = target - counts[language]
             if length > remaining:
-                token_ids = tokenizer.encode(
-                    text, add_special_tokens=False
-                ).ids[:remaining]
+                token_ids = token_ids[:remaining]
                 item["text"] = tokenizer.decode(token_ids)
-                length = len(token_ids)
+                length = remaining
             item["language"] = language
             item["token_count"] = length
             handle.write(json.dumps(item, ensure_ascii=False) + "\n")
