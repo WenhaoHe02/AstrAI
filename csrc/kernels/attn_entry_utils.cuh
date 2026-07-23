@@ -20,12 +20,13 @@ using bf16 = __nv_bfloat16;
     }
 
 template<typename P>
-inline void alloc_split_partials(P& p) {
+inline std::pair<torch::Tensor, torch::Tensor> alloc_split_partials(P& p) {
     auto fopt = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
     auto o_part = torch::empty({p.batch, p.q_head, p.num_splits, p.head_dim}, fopt);
     auto ml_part = torch::empty({p.batch, p.q_head, p.num_splits, 2}, fopt);
     p.o_part = (float*)o_part.data_ptr();
     p.ml_part = (float*)ml_part.data_ptr();
+    return {o_part, ml_part};
 }
 
 // ---- Shared Q-dims + strides extraction ----

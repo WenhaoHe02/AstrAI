@@ -21,7 +21,8 @@ torch::Tensor attn_paged_decode(
     auto O_view = (layout == 1) ? O.transpose(1, 2) : O;
     p.o = (bf16*)O_view.data_ptr();
 
-    alloc_split_partials(p);
+    p.num_splits = paged_decode_num_splits(p);
+    auto partials = alloc_split_partials(p);
     DISPATCH_HEAD_DIM(p.head_dim, dispatch_paged_decode, p);
     return O;
 }

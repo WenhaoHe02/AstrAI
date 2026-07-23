@@ -21,6 +21,30 @@ inline int compute_num_splits(int base_blocks, int tiles_total) {
     return std::max(1, std::min(n, std::min(tiles_total, 32)));
 }
 
+inline int decode_num_splits(const AttentionParams<bf16>& p) {
+    int group_size = p.q_head / p.kv_head;
+#ifndef ASTRAI_NO_MMA
+    if (group_size >= 1 && group_size <= 16) {
+        return compute_num_splits(
+            p.batch * p.kv_head, (p.kv_len + 32 - 1) / 32);
+    }
+#endif
+    return compute_num_splits(
+        p.batch * p.kv_head, (p.kv_len + DC_CHUNK - 1) / DC_CHUNK);
+}
+
+inline int paged_decode_num_splits(const PagedAttentionParams<bf16>& p) {
+    int group_size = p.q_head / p.kv_head;
+#ifndef ASTRAI_NO_MMA
+    if (group_size >= 1 && group_size <= 16 && p.page_size >= 32) {
+        return compute_num_splits(
+            p.batch * p.kv_head, (p.kv_len + 32 - 1) / 32);
+    }
+#endif
+    return compute_num_splits(
+        p.batch * p.kv_head, (p.kv_len + PDC_CHUNK - 1) / PDC_CHUNK);
+}
+
 // ======================================================================
 // Prefill
 // ======================================================================

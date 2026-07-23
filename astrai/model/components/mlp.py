@@ -158,7 +158,7 @@ class GroupedExperts(nn.Module):
         return torch.cat(chunks, dim=0)
 
     def forward(self, x: Tensor, counts: Tensor) -> Tensor:
-        offsets = counts.to(dtype=torch.int32).cumsum(0)
+        offsets = counts.cumsum(0, dtype=torch.int32)
         up = self._grouped_mm(x, self.up_weight, offsets)
         gate = self._grouped_mm(x, self.gate_weight, offsets)
         hidden = up * F.silu(gate)
