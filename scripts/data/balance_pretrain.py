@@ -54,7 +54,9 @@ def expand(patterns: list[str]) -> list[Path]:
             paths.extend(Path().glob(pattern))
     if not paths:
         raise SystemExit(f"no files matched: {patterns}")
-    return paths
+    # Every producer and consumer of the compact token index must use the
+    # identical file order.  ``Path.rglob`` ordering is filesystem-dependent.
+    return sorted(paths)
 
 
 def iter_tokenized(
@@ -132,6 +134,8 @@ def write_token_index_parallel(
     workers: int,
 ) -> int:
     """Build per-file indexes concurrently, then concatenate in source order."""
+
+    paths = sorted(paths)
 
     if workers <= 1 or len(paths) <= 1:
         tokenizer = Tokenizer.from_file(tokenizer_path)

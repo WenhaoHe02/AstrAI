@@ -76,3 +76,14 @@ def test_token_index_stats_and_document_overhead(tmp_path):
         (records[0], 3, None),
         (records[1], 4, None),
     ]
+
+
+def test_expand_returns_stable_sorted_file_order(tmp_path):
+    for name in ("z.jsonl", "a.jsonl", "m.jsonl"):
+        (tmp_path / name).write_text('{"text":"x"}\n', encoding="utf-8")
+
+    assert [path.name for path in balance_pretrain.expand([str(tmp_path)])] == [
+        "a.jsonl",
+        "m.jsonl",
+        "z.jsonl",
+    ]
