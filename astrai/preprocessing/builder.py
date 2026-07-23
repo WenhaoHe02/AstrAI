@@ -55,11 +55,14 @@ class SectionRenderer:
             field = sec["field"]
             action = sec["action"]
             use_template = sec.get("template", False)
+            append_eos = sec.get("append_eos", False)
             add_special = sec.get(
                 "add_special_tokens", not use_template and first_section
             )
 
             if use_template:
+                if append_eos:
+                    raise ValueError("append_eos is only supported for text sections")
                 success = self._append_template(
                     item, field, action, tokenizer, config, all_ids, loss_mask
                 )
@@ -76,6 +79,7 @@ class SectionRenderer:
                     config,
                     all_ids,
                     loss_mask,
+                    append_eos,
                 )
                 if not success:
                     continue
@@ -110,20 +114,25 @@ class SectionRenderer:
         is_text_config = not has_template and all(
             s["action"] == "train" for s in sections
         )
-        plans: list[list[tuple[str, str, bool]]] = []
+        plans: list[list[tuple[str, str, bool, bool]]] = []
 
         for item in items:
-            plan: list[tuple[str, str, bool]] = []
+            plan: list[tuple[str, str, bool, bool]] = []
             first_section = True
             for sec in sections:
                 field = sec["field"]
                 action = sec["action"]
                 use_template = sec.get("template", False)
+                append_eos = sec.get("append_eos", False)
                 add_special = sec.get(
                     "add_special_tokens", not use_template and first_section
                 )
 
                 if use_template:
+                    if append_eos:
+                        raise ValueError(
+                            "append_eos is only supported for text sections"
+                        )
                     messages = item.get(field)
                     if not isinstance(messages, list) or not messages:
                         continue
@@ -133,7 +142,12 @@ class SectionRenderer:
                             [msg], tokenize=False, add_generation_prompt=False
                         )
                         plan.append(
-                            (rendered, _resolve_action(action, role, config), False)
+                            (
+                                rendered,
+                                _resolve_action(action, role, config),
+                                False,
+                                False,
+                            )
                         )
                 else:
                     text = str(item.get(field, ""))
@@ -145,7 +159,7 @@ class SectionRenderer:
                             continue
                         if len(text) > pp.max_chars:
                             continue
-                    plan.append((text, action, add_special))
+                    plan.append((text, action, add_special, append_eos))
 
                 first_section = False
             plans.append(plan)
@@ -155,7 +169,7 @@ class SectionRenderer:
             refs = [
                 (item_idx, unit_idx, text)
                 for item_idx, plan in enumerate(plans)
-                for unit_idx, (text, _, add) in enumerate(plan)
+                for unit_idx, (text, _, add, _) in enumerate(plan)
                 if add == add_special
             ]
             if not refs:
@@ -174,8 +188,13 @@ class SectionRenderer:
             if is_top_level and has_template and tokenizer.bos_token_id is not None:
                 all_ids.append(tokenizer.bos_token_id)
                 loss_mask.append(0)
-            for unit_idx, (_, action, _) in enumerate(plan):
+            for unit_idx, (_, action, _, append_eos) in enumerate(plan):
                 ids = encoded[(item_idx, unit_idx)]
+                if append_eos:
+                    eos_id = tokenizer.eos_token_id
+                    if eos_id is None:
+                        raise ValueError("append_eos requires an eos special token")
+                    ids = [*ids, eos_id]
                 all_ids.extend(ids)
                 loss_mask.extend([1 if action == "train" else 0] * len(ids))
             if config.preprocessing.packing_strategy != "bfd_split":
@@ -320,6 +339,7 @@ class SectionRenderer:
         config,
         all_ids,
         loss_mask,
+        append_eos=False,
     ):
         text = str(item.get(field, ""))
         if not text.strip():
@@ -331,6 +351,11 @@ class SectionRenderer:
             if len(text) > pp.max_chars:
                 return False
         ids = tokenizer.encode(text, add_special_tokens=add_special)
+        if append_eos:
+            eos_id = tokenizer.eos_token_id
+            if eos_id is None:
+                raise ValueError("append_eos requires an eos special token")
+            ids = [*ids, eos_id]
         all_ids.extend(ids)
         val = 1 if action == "train" else 0
         loss_mask.extend([val] * len(ids))

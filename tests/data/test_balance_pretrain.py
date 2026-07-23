@@ -1,5 +1,6 @@
 import gzip
 import json
+import struct
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
@@ -58,3 +59,20 @@ def test_token_index_detects_truncation(tmp_path):
         assert "ended before source records" in str(exc)
     else:
         raise AssertionError("a truncated token index must fail")
+
+
+def test_token_index_stats_and_document_overhead(tmp_path):
+    source = tmp_path / "records.jsonl"
+    records = [{"text": "one two"}, {"text": "three four five"}]
+    source.write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+    index = tmp_path / "counts.u64"
+    index.write_bytes(struct.pack("<QQ", 2, 3))
+
+    assert balance_pretrain.token_index_stats(index) == (2, 5)
+    assert list(balance_pretrain.iter_indexed([source], index, 1)) == [
+        (records[0], 3, None),
+        (records[1], 4, None),
+    ]

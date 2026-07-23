@@ -51,7 +51,8 @@ launch "$log_root/balance-full.log" \
     --zh /mnt/nvme4/astrai/dedup/zh --en /mnt/nvme4/astrai/dedup/en \
     --tokenizer params/astrai-12b-mqa-moe/tokenizer.json \
     --output /mnt/nvme3/astrai/normalized/pretrain-balanced.jsonl \
-    --tokens-per-language auto --batch-size 512 --index-workers 8
+    --tokens-per-language auto --batch-size 512 --index-workers 8 \
+    --document-token-overhead 1
 balance_pid=$launched_pid
 
 launch "$log_root/preprocess-full.log" \

@@ -4,7 +4,8 @@
     "sections": [
       {
         "field": "text",
-        "action": "train"
+        "action": "train",
+        "append_eos": true
       }
     ]
   },

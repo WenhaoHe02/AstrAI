@@ -185,6 +185,19 @@ class AutoTokenizer:
         if key.startswith("_"):
             raise AttributeError(key)
 
+        def special_token(name: str):
+            """Resolve both ``eos`` and Hugging Face-style ``eos_token`` keys."""
+
+            candidates = [name]
+            if name.endswith("_token"):
+                candidates.append(name[: -len("_token")])
+            else:
+                candidates.append(name + "_token")
+            for candidate in candidates:
+                if candidate in self._special_token_map:
+                    return self._special_token_map[candidate]
+            return None
+
         # Handle stop_ids - return IDs for all special tokens
         if key == "stop_ids":
             stop_ids = []
@@ -202,7 +215,7 @@ class AutoTokenizer:
         # Handle _id suffix (e.g., bos_token_id -> bos_token)
         if key.endswith("_id"):
             base_attr = key[:-3]  # Remove "_id"
-            token_str = self._special_token_map.get(base_attr)
+            token_str = special_token(base_attr)
             if token_str is None:
                 return None
             if self._tokenizer is None:
@@ -210,8 +223,9 @@ class AutoTokenizer:
             return self._tokenizer.token_to_id(token_str)
 
         # Handle regular string attributes
-        if key in self._special_token_map:
-            return self._special_token_map.get(key)
+        token_str = special_token(key)
+        if token_str is not None:
+            return token_str
 
         # Other attributes trigger default AttributeError
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{key}'")

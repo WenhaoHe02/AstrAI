@@ -229,6 +229,23 @@ def test_text_basic(test_tokenizer, builder):
     assert "loss_mask" not in result
 
 
+def test_text_append_eos_matches_batch_and_single(chat_tokenizer, builder):
+    config = PipelineConfig(
+        input=InputConfig(
+            sections=[{"field": "text", "action": "train", "append_eos": True}]
+        ),
+        preprocessing=ProcessingConfig(max_seq_len=2048, min_chars=1),
+    )
+    items = [{"text": "hello world"}, {"text": "another document"}]
+    expected = [builder.build(item, config, chat_tokenizer) for item in items]
+
+    assert builder.build_batch(items, config, chat_tokenizer) == expected
+    assert all(
+        result["sequence"][-1] == chat_tokenizer.eos_token_id
+        for result in expected
+    )
+
+
 def test_text_empty(test_tokenizer, builder):
     config = make_text_config()
     assert builder.build({"text": ""}, config, test_tokenizer) is None

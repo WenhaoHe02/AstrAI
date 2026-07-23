@@ -1,11 +1,13 @@
 """Create a deterministic, tokenizer-exact language-balanced JSONL stream."""
 
 import argparse
+import array
 import gzip
 import json
 import os
 import shutil
 import struct
+import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextlib import ExitStack
 from multiprocessing import get_context
@@ -178,8 +180,34 @@ def write_token_index_parallel(
     return sum(totals)
 
 
+def token_index_stats(index: Path) -> tuple[int, int]:
+    """Return ``(documents, text_tokens)`` from a compact uint64 index."""
+
+    size = index.stat().st_size
+    if size % TOKEN_COUNT.size:
+        raise RuntimeError(f"invalid token index byte length: {index}")
+    total = 0
+    with index.open("rb") as handle:
+        while chunk := handle.read(8 * 1024 * 1024):
+            values = array.array("Q")
+            values.frombytes(chunk)
+            if sys.byteorder != "little":
+                values.byteswap()
+            total += sum(values)
+    return size // TOKEN_COUNT.size, total
+
+
+def validate_reusable_index(index: Path, paths: list[Path]) -> tuple[int, int]:
+    if not index.is_file():
+        raise RuntimeError(f"reusable token index does not exist: {index}")
+    newest_source = max(path.stat().st_mtime_ns for path in paths)
+    if index.stat().st_mtime_ns < newest_source:
+        raise RuntimeError(f"token index is older than its source data: {index}")
+    return token_index_stats(index)
+
+
 def iter_indexed(
-    paths: list[Path], index: Path
+    paths: list[Path], index: Path, document_token_overhead: int = 0
 ) -> Iterator[tuple[dict, int, None]]:
     """Pair source records with counts produced by :func:`write_token_index`."""
 
@@ -190,16 +218,23 @@ def iter_indexed(
             packed = counts.read(TOKEN_COUNT.size)
             if len(packed) != TOKEN_COUNT.size:
                 raise RuntimeError(f"token index ended before source records: {index}")
-            yield item, TOKEN_COUNT.unpack(packed)[0], None
+            yield (
+                item,
+                TOKEN_COUNT.unpack(packed)[0] + document_token_overhead,
+                None,
+            )
         if counts.read(1):
             raise RuntimeError(f"token index contains extra records: {index}")
 
 
 def iter_with_tokens(
-    paths: list[Path], tokenizer: Tokenizer, batch_size: int
+    paths: list[Path],
+    tokenizer: Tokenizer,
+    batch_size: int,
+    document_token_overhead: int = 0,
 ) -> Iterator[tuple[dict, int, list[int]]]:
     for item, token_ids in iter_tokenized(paths, tokenizer, batch_size):
-        yield item, len(token_ids), token_ids
+        yield item, len(token_ids) + document_token_overhead, token_ids
 
 
 def main() -> None:
@@ -220,11 +255,24 @@ def main() -> None:
         default=1,
         help="Processes used to build token-count indexes (default: 1)",
     )
+    parser.add_argument(
+        "--reuse-token-indexes",
+        action="store_true",
+        help="Reuse existing .tokens.u64 files after freshness validation",
+    )
+    parser.add_argument(
+        "--document-token-overhead",
+        type=int,
+        default=0,
+        help="Tokens added per document downstream, such as one EOS token",
+    )
     args = parser.parse_args()
     if args.batch_size < 1:
         parser.error("--batch-size must be positive")
     if args.index_workers < 1:
         parser.error("--index-workers must be positive")
+    if args.document_token_overhead < 0:
+        parser.error("--document-token-overhead must be non-negative")
 
     tokenizer = Tokenizer.from_file(args.tokenizer)
     paths = {"zh": expand(args.zh), "en": expand(args.en)}
@@ -234,26 +282,64 @@ def main() -> None:
             language: output.with_name(output.name + f".{language}.tokens.u64")
             for language in paths
         }
+        if args.reuse_token_indexes:
+            index_stats = {
+                language: validate_reusable_index(
+                    indexes[language], source_paths
+                )
+                for language, source_paths in paths.items()
+            }
+        else:
+            index_stats = {}
+            for language, source_paths in paths.items():
+                text_tokens = write_token_index_parallel(
+                    source_paths,
+                    args.tokenizer,
+                    args.batch_size,
+                    indexes[language],
+                    args.index_workers,
+                )
+                documents, indexed_tokens = token_index_stats(indexes[language])
+                if indexed_tokens != text_tokens:
+                    raise RuntimeError(
+                        f"token index sum mismatch for {language}: "
+                        f"{indexed_tokens} != {text_tokens}"
+                    )
+                index_stats[language] = (documents, text_tokens)
         available = {
-            language: write_token_index_parallel(
-                source_paths,
-                args.tokenizer,
-                args.batch_size,
-                indexes[language],
-                args.index_workers,
-            )
-            for language, source_paths in paths.items()
+            language: text_tokens + documents * args.document_token_overhead
+            for language, (documents, text_tokens) in index_stats.items()
         }
         target = min(available.values())
-        print(json.dumps({"available_tokens": available, "target": target}))
+        print(
+            json.dumps(
+                {
+                    "available_tokens": available,
+                    "indexed_documents": {
+                        language: stats[0] for language, stats in index_stats.items()
+                    },
+                    "document_token_overhead": args.document_token_overhead,
+                    "target": target,
+                }
+            )
+        )
         streams = {
-            language: iter_indexed(source_paths, indexes[language])
+            language: iter_indexed(
+                source_paths,
+                indexes[language],
+                args.document_token_overhead,
+            )
             for language, source_paths in paths.items()
         }
     else:
         target = int(args.tokens_per_language)
         streams = {
-            language: iter_with_tokens(source_paths, tokenizer, args.batch_size)
+            language: iter_with_tokens(
+                source_paths,
+                tokenizer,
+                args.batch_size,
+                args.document_token_overhead,
+            )
             for language, source_paths in paths.items()
         }
     if target < 1:
@@ -275,11 +361,17 @@ def main() -> None:
                 ) from exc
             remaining = target - counts[language]
             if length > remaining:
+                text_tokens_to_keep = remaining - args.document_token_overhead
+                if text_tokens_to_keep < 1:
+                    raise RuntimeError(
+                        "exact target would require an empty final document; "
+                        "choose a nearby explicit token target"
+                    )
                 if token_ids is None:
                     token_ids = tokenizer.encode(
                         item["text"], add_special_tokens=False
                     ).ids
-                token_ids = token_ids[:remaining]
+                token_ids = token_ids[:text_tokens_to_keep]
                 item["text"] = tokenizer.decode(token_ids)
                 length = remaining
             item["language"] = language
