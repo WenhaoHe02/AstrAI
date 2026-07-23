@@ -81,8 +81,10 @@ def _build_attn_mask(
         elif mask.dim() == 3:
             # [batch, q_len, kv_len] → [batch, 1, q_len, kv_len]
             attn_mask = mask[:, None, :, :]
+        elif mask.dim() == 4:
+            attn_mask = mask
         else:
-            raise ValueError(f"mask must be 2D or 3D, got {mask.dim()}D")
+            raise ValueError(f"mask must be 2D, 3D, or 4D, got {mask.dim()}D")
 
     if causal_offset >= 0:
         batch = q.size(0)
@@ -177,12 +179,14 @@ def attn_decode(
     layout: str = "bhld",
 ) -> torch.Tensor:
     li = _parse_layout(layout)
-    if _available["attn_decode"]:
+    kernel_mask = mask[:, 0] if mask is not None and mask.dim() == 4 else mask
+    kernel_mask_supported = mask is None or mask.dim() < 4 or mask.size(1) == 1
+    if _available["attn_decode"] and kernel_mask_supported:
         return _modules["attn_decode"].attn_decode(
             q,
             k,
             v,
-            mask=mask,
+            mask=kernel_mask,
             causal_offset=causal_offset,
             scale=scale,
             layout=li,
@@ -200,12 +204,14 @@ def attn_prefill(
     layout: str = "bhld",
 ) -> torch.Tensor:
     li = _parse_layout(layout)
-    if _available["attn_prefill"]:
+    kernel_mask = mask[:, 0] if mask is not None and mask.dim() == 4 else mask
+    kernel_mask_supported = mask is None or mask.dim() < 4 or mask.size(1) == 1
+    if _available["attn_prefill"] and kernel_mask_supported:
         return _modules["attn_prefill"].attn_prefill(
             q,
             k,
             v,
-            mask=mask,
+            mask=kernel_mask,
             causal_offset=causal_offset,
             scale=scale,
             layout=li,
@@ -226,7 +232,9 @@ def attn_paged_decode(
     layout: str = "bhld",
 ) -> torch.Tensor:
     li = _parse_layout(layout)
-    if _available["attn_paged_decode"]:
+    kernel_mask = mask[:, 0] if mask is not None and mask.dim() == 4 else mask
+    kernel_mask_supported = mask is None or mask.dim() < 4 or mask.size(1) == 1
+    if _available["attn_paged_decode"] and kernel_mask_supported:
         return _modules["attn_paged_decode"].attn_paged_decode(
             q,
             page_table,
@@ -234,7 +242,7 @@ def attn_paged_decode(
             v_cache,
             page_size,
             kv_len,
-            mask=mask,
+            mask=kernel_mask,
             causal_offset=causal_offset,
             scale=scale,
             layout=li,
