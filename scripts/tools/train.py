@@ -56,14 +56,18 @@ class MuonMix(optim.Optimizer):
             else:
                 other_params.append(param)
 
-        self.muon = optim.Muon(
-            matrix_params,
-            lr=lr,
-            weight_decay=weight_decay,
-            momentum=momentum,
-            nesterov=nesterov,
-            ns_steps=ns_steps,
-            adjust_lr_fn=adjust_lr_fn,
+        self.muon = (
+            optim.Muon(
+                matrix_params,
+                lr=lr,
+                weight_decay=weight_decay,
+                momentum=momentum,
+                nesterov=nesterov,
+                ns_steps=ns_steps,
+                adjust_lr_fn=adjust_lr_fn,
+            )
+            if matrix_params
+            else None
         )
         self.adamw = optim.AdamW(
             [{"params": other_params, "weight_decay": 0.0}],
@@ -72,27 +76,36 @@ class MuonMix(optim.Optimizer):
             fused=True,
         )
 
-        self.param_groups = [*self.muon.param_groups, *self.adamw.param_groups]
+        self.param_groups = [
+            *(self.muon.param_groups if self.muon is not None else []),
+            *self.adamw.param_groups,
+        ]
 
     @torch.no_grad()
     def step(self, closure=None):
-        self.muon.step(closure)
+        if self.muon is not None:
+            self.muon.step(closure)
         self.adamw.step(closure)
 
     def zero_grad(self, set_to_none: bool = True):
-        self.muon.zero_grad(set_to_none)
+        if self.muon is not None:
+            self.muon.zero_grad(set_to_none)
         self.adamw.zero_grad(set_to_none)
 
     def state_dict(self) -> Dict[str, Any]:
-        return {
-            "muon": self.muon.state_dict(),
-            "adamw": self.adamw.state_dict(),
-        }
+        state = {"adamw": self.adamw.state_dict()}
+        if self.muon is not None:
+            state["muon"] = self.muon.state_dict()
+        return state
 
     def load_state_dict(self, state_dict: Dict[str, Any]):
-        self.muon.load_state_dict(state_dict["muon"])
+        if self.muon is not None and "muon" in state_dict:
+            self.muon.load_state_dict(state_dict["muon"])
         self.adamw.load_state_dict(state_dict["adamw"])
-        self.param_groups = [*self.muon.param_groups, *self.adamw.param_groups]
+        self.param_groups = [
+            *(self.muon.param_groups if self.muon is not None else []),
+            *self.adamw.param_groups,
+        ]
 
 
 def parse_args() -> argparse.Namespace:
