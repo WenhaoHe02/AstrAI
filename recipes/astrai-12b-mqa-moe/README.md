@@ -26,6 +26,27 @@ python scripts/tools/preprocess.py data/*.jsonl \
 
 The binary storage is memory-mapped by the dataset reader, so the tokenized corpus does not need to fit in RAM.
 
+For the production corpus, run `scripts/data/curate_pretrain.py quality` once
+per language, followed by its `minhash` subcommand. The configured 9 bands x
+10 hashes use 64-bit hashes and give an approximate near-duplicate threshold
+of 0.803. Keep Chinese (`--language zh`) and English (`--language en`) in
+separate MinHash runs so each uses the correct word splitter.
+
+Build the final mixture from the deduplicated outputs with the model's actual
+tokenizer, rather than balancing files, bytes, or document counts:
+
+```bash
+python scripts/data/balance_pretrain.py \
+  --zh data/dedup/zh --en data/dedup/en \
+  --tokenizer params/astrai-12b-mqa-moe/tokenizer.json \
+  --output data/pretrain-balanced.jsonl \
+  --tokens-per-language auto --batch-size 512
+```
+
+`auto` counts both cleaned corpora and selects exactly the smaller token count
+from each language. The `bfd_split` preprocessing recipe then preserves long
+documents by splitting them into 2048-token chunks instead of truncating them.
+
 ## Smoke training
 
 Start with a tiny processed shard before using the complete corpus:
