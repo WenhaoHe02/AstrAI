@@ -44,8 +44,10 @@ python scripts/data/balance_pretrain.py \
 ```
 
 `auto` counts both cleaned corpora and selects exactly the smaller token count
-from each language. The `bfd_split` preprocessing recipe then preserves long
-documents by splitting them into 2048-token chunks instead of truncating them.
+from each language. It persists compact `.tokens.u64` indexes while counting,
+so the output pass does not tokenize the complete corpora a second time. The
+`bfd_split` preprocessing recipe then preserves long documents by splitting
+them into 2048-token chunks instead of truncating them.
 
 ## Smoke training
 

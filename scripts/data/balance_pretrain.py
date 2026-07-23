@@ -3,11 +3,16 @@
 import argparse
 import gzip
 import json
+import os
+import struct
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Iterator, TextIO
 
 from tokenizers import Tokenizer
+
+
+TOKEN_COUNT = struct.Struct("<Q")
 
 
 def open_text(path: Path, mode: str) -> TextIO:
@@ -78,6 +83,50 @@ def count_tokens(paths: list[Path], tokenizer: Tokenizer, batch_size: int) -> in
     )
 
 
+def write_token_index(
+    paths: list[Path], tokenizer: Tokenizer, batch_size: int, output: Path
+) -> int:
+    """Tokenize once and persist one exact uint64 token count per document."""
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_name(output.name + ".tmp")
+    total = 0
+    try:
+        with temporary.open("wb") as handle:
+            for _, token_ids in iter_tokenized(paths, tokenizer, batch_size):
+                length = len(token_ids)
+                handle.write(TOKEN_COUNT.pack(length))
+                total += length
+        os.replace(temporary, output)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return total
+
+
+def iter_indexed(
+    paths: list[Path], index: Path
+) -> Iterator[tuple[dict, int, None]]:
+    """Pair source records with counts produced by :func:`write_token_index`."""
+
+    with index.open("rb") as counts:
+        for item in iter_records(paths):
+            if not item.get("text", "").strip():
+                continue
+            packed = counts.read(TOKEN_COUNT.size)
+            if len(packed) != TOKEN_COUNT.size:
+                raise RuntimeError(f"token index ended before source records: {index}")
+            yield item, TOKEN_COUNT.unpack(packed)[0], None
+        if counts.read(1):
+            raise RuntimeError(f"token index contains extra records: {index}")
+
+
+def iter_with_tokens(
+    paths: list[Path], tokenizer: Tokenizer, batch_size: int
+) -> Iterator[tuple[dict, int, list[int]]]:
+    for item, token_ids in iter_tokenized(paths, tokenizer, batch_size):
+        yield item, len(token_ids), token_ids
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--zh", nargs="+", required=True)
@@ -97,21 +146,31 @@ def main() -> None:
     tokenizer = Tokenizer.from_file(args.tokenizer)
     paths = {"zh": expand(args.zh), "en": expand(args.en)}
     if args.tokens_per_language == "auto":
+        output = Path(args.output)
+        indexes = {
+            language: output.with_name(output.name + f".{language}.tokens.u64")
+            for language in paths
+        }
         available = {
-            language: count_tokens(source_paths, tokenizer, args.batch_size)
+            language: write_token_index(
+                source_paths, tokenizer, args.batch_size, indexes[language]
+            )
             for language, source_paths in paths.items()
         }
         target = min(available.values())
         print(json.dumps({"available_tokens": available, "target": target}))
+        streams = {
+            language: iter_indexed(source_paths, indexes[language])
+            for language, source_paths in paths.items()
+        }
     else:
         target = int(args.tokens_per_language)
+        streams = {
+            language: iter_with_tokens(source_paths, tokenizer, args.batch_size)
+            for language, source_paths in paths.items()
+        }
     if target < 1:
         raise SystemExit("token target must be positive")
-
-    streams = {
-        language: iter_tokenized(source_paths, tokenizer, args.batch_size)
-        for language, source_paths in paths.items()
-    }
     counts = {"zh": 0, "en": 0}
     docs = {"zh": 0, "en": 0}
     output = Path(args.output)
@@ -122,14 +181,17 @@ def main() -> None:
         while min(counts.values()) < target:
             language = min(counts, key=counts.get)
             try:
-                item, token_ids = next(streams[language])
+                item, length, token_ids = next(streams[language])
             except StopIteration as exc:
                 raise RuntimeError(
                     f"{language} exhausted at {counts[language]:,} tokens"
                 ) from exc
-            length = len(token_ids)
             remaining = target - counts[language]
             if length > remaining:
+                if token_ids is None:
+                    token_ids = tokenizer.encode(
+                        item["text"], add_special_tokens=False
+                    ).ids
                 token_ids = token_ids[:remaining]
                 item["text"] = tokenizer.decode(token_ids)
                 length = remaining
