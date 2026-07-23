@@ -16,8 +16,15 @@ def open_text(path: Path, mode: str) -> TextIO:
     return path.open(mode, encoding="utf-8")
 
 
-def iter_jsonl(paths: list[Path]) -> Iterator[dict]:
+def iter_records(paths: list[Path]) -> Iterator[dict]:
     for path in sorted(paths):
+        if path.suffix == ".parquet":
+            import pyarrow.parquet as pq
+
+            parquet = pq.ParquetFile(path)
+            for batch in parquet.iter_batches(batch_size=1024, columns=["text"]):
+                yield from batch.to_pylist()
+            continue
         with open_text(path, "rt") as handle:
             for line in handle:
                 if line.strip():
@@ -49,7 +56,7 @@ def main() -> None:
     args = parser.parse_args()
 
     tokenizer = Tokenizer.from_file(args.tokenizer)
-    streams = {"zh": iter_jsonl(expand(args.zh)), "en": iter_jsonl(expand(args.en))}
+    streams = {"zh": iter_records(expand(args.zh)), "en": iter_records(expand(args.en))}
     counts = {"zh": 0, "en": 0}
     docs = {"zh": 0, "en": 0}
     output = Path(args.output)
