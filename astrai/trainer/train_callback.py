@@ -145,11 +145,13 @@ class CheckpointCallback(TrainCallback):
         interval: int,
         weight_only: bool = False,
         save_extra_fn: Optional[Callable[["TrainContext"], dict]] = None,
+        checkpoint_after_first_step: bool = False,
     ):
         self.save_dir = save_dir
         self.interval = interval
         self.weight_only = weight_only
         self.save_extra_fn = save_extra_fn or CheckpointCallback.save_extra
+        self.checkpoint_after_first_step = checkpoint_after_first_step
         self.last_ckpt_step = None
 
     def on_train_begin(self, context: TrainContext):
@@ -185,7 +187,9 @@ class CheckpointCallback(TrainCallback):
                 context.checkpoint.save(save_path)
 
     def on_optimizer_step_end(self, context: TrainContext):
-        if context.optimizer_step - self.last_ckpt_step >= self.interval:
+        if (
+            self.checkpoint_after_first_step and context.optimizer_step == 1
+        ) or context.optimizer_step - self.last_ckpt_step >= self.interval:
             self._save_checkpoint(context)
 
     def on_train_end(self, context: TrainContext):

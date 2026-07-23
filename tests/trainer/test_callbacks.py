@@ -1,11 +1,17 @@
 import os
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import torch
 
 from astrai.config.train_config import TrainConfig
 from astrai.model.components.decoder_block import DecoderBlock
 from astrai.trainer.schedule import SchedulerFactory
-from astrai.trainer.train_callback import GradientCheckpointingCallback, TrainCallback
+from astrai.trainer.train_callback import (
+    CheckpointCallback,
+    GradientCheckpointingCallback,
+    TrainCallback,
+)
 from astrai.trainer.trainer import Trainer
 
 
@@ -28,6 +34,22 @@ def test_gradient_checkpointing_enable_disable(test_model):
 
     for layer in model.layers:
         assert not hasattr(layer, "_original_forward")
+
+
+def test_checkpoint_after_first_step_is_one_shot():
+    callback = CheckpointCallback(
+        "unused", interval=5000, checkpoint_after_first_step=True
+    )
+    context = SimpleNamespace(optimizer_step=0)
+    callback.on_train_begin(context)
+    callback._save_checkpoint = Mock()
+
+    context.optimizer_step = 1
+    callback.on_optimizer_step_end(context)
+    context.optimizer_step = 2
+    callback.on_optimizer_step_end(context)
+
+    callback._save_checkpoint.assert_called_once_with(context)
 
 
 def test_gradient_checkpointing_empty_modules_noop(test_model):

@@ -61,6 +61,10 @@ class TrainConfig(BaseConfig):
         default=5000,
         metadata={"help": "Number of optimizer steps between checkpoints."},
     )
+    checkpoint_after_first_step: bool = field(
+        default=False,
+        metadata={"help": "Save a recovery checkpoint after optimizer step 1."},
+    )
 
     # lora setting
     lora: Optional[LoRAConfig] = field(

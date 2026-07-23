@@ -279,6 +279,12 @@ def parse_args() -> argparse.Namespace:
         help="Number of iters between checkpoints.",
     )
     parser.add_argument(
+        "--checkpoint_after_first_step",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Save a recovery checkpoint after optimizer step 1.",
+    )
+    parser.add_argument(
         "--ckpt_dir",
         type=str,
         default="checkpoint",
@@ -448,6 +454,7 @@ def train(
     grad_accum_steps: int,
     warmup_ratio: float,
     ckpt_interval: int,
+    checkpoint_after_first_step: bool,
     ckpt_dir: str,
     val_split: float,
     val_step: int,
@@ -591,6 +598,7 @@ def train(
         start_epoch=start_epoch,
         start_samples=start_samples,
         ckpt_interval=ckpt_interval,
+        checkpoint_after_first_step=checkpoint_after_first_step,
         grad_accum_steps=grad_accum_steps,
         max_grad_norm=max_grad_norm,
         random_seed=random_seed,

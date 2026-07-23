@@ -33,6 +33,7 @@ class Trainer:
                 "checkpoint",
                 cfg.ckpt_dir,
                 cfg.ckpt_interval,
+                checkpoint_after_first_step=cfg.checkpoint_after_first_step,
             ),
             CallbackFactory.create(
                 "metric",
