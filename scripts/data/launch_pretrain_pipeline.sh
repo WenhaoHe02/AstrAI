@@ -55,16 +55,19 @@ launch "$log_root/balance-full.log" \
 balance_pid=$launched_pid
 
 launch "$log_root/preprocess-full.log" \
-    "$curation_python" scripts/data/wait_and_run.py --pid "$balance_pid" -- \
-    "$train_python" scripts/tools/preprocess.py \
-    /mnt/nvme3/astrai/normalized/pretrain-balanced.jsonl \
-    -o /mnt/nvme6/astrai/tokenized/pretrain-2048 \
-    -c recipes/astrai-12b-mqa-moe/pretrain-2048.json \
-    --tokenizer_path params/astrai-12b-mqa-moe
+    "$curation_python" scripts/data/wait_and_run.py --pid "$balance_pid" \
+    --require /mnt/nvme3/astrai/normalized/pretrain-balanced.jsonl.stats.json -- \
+    /usr/bin/env RAYON_NUM_THREADS=12 TOKENIZERS_PARALLELISM=true \
+    "$train_python" scripts/data/parallel_preprocess.py \
+    --input /mnt/nvme3/astrai/normalized/pretrain-balanced.jsonl \
+    --output /mnt/nvme6/astrai/tokenized/pretrain-2048 \
+    --config recipes/astrai-12b-mqa-moe/pretrain-2048.json \
+    --tokenizer-path params/astrai-12b-mqa-moe --workers 8
 preprocess_pid=$launched_pid
 
 launch "$log_root/train-pretrain-12b.log" \
-    "$curation_python" scripts/data/wait_and_run.py --pid "$preprocess_pid" -- \
+    "$curation_python" scripts/data/wait_and_run.py --pid "$preprocess_pid" \
+    --require /mnt/nvme6/astrai/tokenized/pretrain-2048/_SUCCESS -- \
     /usr/bin/env PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True NCCL_DEBUG=WARN \
     "$train_python" scripts/tools/train.py \
     --nprocs=8 --parallel_mode=fsdp --train_type=seq \
