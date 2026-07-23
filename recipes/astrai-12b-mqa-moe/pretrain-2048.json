@@ -9,7 +9,9 @@
     ]
   },
   "preprocessing": {
-    "max_seq_len": 2048
+    "max_seq_len": 2048,
+    "packing_strategy": "bfd_split",
+    "max_packed_len": 2048
   },
   "output": {
     "storage_format": "bin"
