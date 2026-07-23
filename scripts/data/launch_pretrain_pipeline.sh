@@ -5,6 +5,8 @@ repo=${ASTRAI_REPO:-/home/zbuser02/AstrAI-12b}
 curation_python=${ASTRAI_CURATION_PYTHON:-/mnt/nvme2/astrai/envs/curation/bin/python}
 train_python=${ASTRAI_TRAIN_PYTHON:-/mnt/nvme9/astrai/envs/train/bin/python}
 log_root=${ASTRAI_LOG_ROOT:-/mnt/nvme9/astrai/logs}
+preprocess_workers=${ASTRAI_PREPROCESS_WORKERS:-32}
+preprocess_rayon_threads=${ASTRAI_PREPROCESS_RAYON_THREADS:-6}
 
 cd "$repo"
 
@@ -58,12 +60,12 @@ balance_pid=$launched_pid
 launch "$log_root/preprocess-full.log" \
     "$curation_python" scripts/data/wait_and_run.py --pid "$balance_pid" \
     --require /mnt/nvme3/astrai/normalized/pretrain-balanced.jsonl.stats.json -- \
-    /usr/bin/env RAYON_NUM_THREADS=12 TOKENIZERS_PARALLELISM=true \
+    /usr/bin/env RAYON_NUM_THREADS="$preprocess_rayon_threads" TOKENIZERS_PARALLELISM=true \
     "$train_python" scripts/data/parallel_preprocess.py \
     --input /mnt/nvme3/astrai/normalized/pretrain-balanced.jsonl \
     --output /mnt/nvme6/astrai/tokenized/pretrain-2048 \
     --config recipes/astrai-12b-mqa-moe/pretrain-2048.json \
-    --tokenizer-path params/astrai-12b-mqa-moe --workers 8
+    --tokenizer-path params/astrai-12b-mqa-moe --workers "$preprocess_workers"
 preprocess_pid=$launched_pid
 
 launch "$log_root/train-pretrain-12b.log" \
