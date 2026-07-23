@@ -83,7 +83,8 @@ class SectionRenderer:
             first_section = False
 
         max_len = config.preprocessing.max_seq_len
-        all_ids = all_ids[:max_len]
+        if config.preprocessing.packing_strategy != "bfd_split":
+            all_ids = all_ids[:max_len]
         loss_mask = loss_mask[: len(all_ids)]
 
         if not all_ids:
@@ -177,7 +178,8 @@ class SectionRenderer:
                 ids = encoded[(item_idx, unit_idx)]
                 all_ids.extend(ids)
                 loss_mask.extend([1 if action == "train" else 0] * len(ids))
-            all_ids = all_ids[:max_len]
+            if config.preprocessing.packing_strategy != "bfd_split":
+                all_ids = all_ids[:max_len]
             loss_mask = loss_mask[: len(all_ids)]
             if not all_ids or (is_top_level and has_template and len(all_ids) <= 1):
                 outputs.append((None, None))

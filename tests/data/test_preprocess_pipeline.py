@@ -143,6 +143,30 @@ def test_full_text_pipeline_reads_gzip_jsonl(temp_dir, tokenizer_dir):
     assert os.path.exists(meta_path)
 
 
+def test_bfd_split_pipeline_preserves_long_document(temp_dir, tokenizer_dir):
+    jsonl_path = os.path.join(temp_dir, "long.jsonl")
+    with open(jsonl_path, "w", encoding="utf-8") as f:
+        f.write(json.dumps({"text": " ".join(f"word{i}" for i in range(500))}))
+
+    config = PipelineConfig(
+        input=InputConfig(sections=_TEXT_SECTIONS),
+        preprocessing=ProcessingConfig(
+            max_seq_len=32,
+            min_chars=1,
+            packing_strategy="bfd_split",
+            max_packed_len=32,
+        ),
+        output=OutputConfig(storage_format="bin"),
+    )
+    out_dir = os.path.join(temp_dir, "output")
+    Pipeline(config, [jsonl_path], out_dir, tokenizer_dir).run()
+
+    meta_path = os.path.join(out_dir, "__default__", "shard_0000", "meta.json")
+    with open(meta_path, "r") as f:
+        meta = json.load(f)
+    assert meta["sequence"]["shape"][0] > 32
+
+
 def test_full_instruction_pipeline(temp_dir, tokenizer_dir):
     jsonl_path = os.path.join(temp_dir, "instruct.jsonl")
     with open(jsonl_path, "w", encoding="utf-8") as f:
