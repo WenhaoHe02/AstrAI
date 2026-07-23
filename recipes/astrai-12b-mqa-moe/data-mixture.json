@@ -1,0 +1,28 @@
+{
+  "basis": "cleaned_token_count",
+  "target_language_ratio": {
+    "zh": 0.5,
+    "en": 0.5
+  },
+  "sources": [
+    {
+      "name": "chinese-cosmopedia",
+      "dataset": "opencsg/chinese-cosmopedia",
+      "language": "zh",
+      "target_weight": 0.5
+    },
+    {
+      "name": "dolma-v1_7-30B",
+      "dataset": "emozilla/dolma-v1_7-30B",
+      "language": "en",
+      "target_weight": 0.5
+    }
+  ],
+  "minhash": {
+    "n_grams": 5,
+    "num_buckets": 9,
+    "hashes_per_bucket": 10,
+    "precision_bits": 64,
+    "approximate_threshold": 0.803
+  }
+}

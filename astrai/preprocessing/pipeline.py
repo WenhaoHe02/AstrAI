@@ -10,6 +10,7 @@ accumulation are shared with :class:`TokenizeTransform` via the
 :mod:`astrai.preprocessing.core` helpers.
 """
 
+import gzip
 import json
 import logging
 import os
@@ -154,7 +155,8 @@ class Pipeline:
 
     def _iter_items(self):
         for path in self.paths:
-            with open(path, "r", encoding="utf-8") as f:
+            opener = gzip.open if path.endswith(".gz") else open
+            with opener(path, "rt", encoding="utf-8") as f:
                 if path.endswith(".json"):
                     data = json.load(f)
                     if isinstance(data, dict):

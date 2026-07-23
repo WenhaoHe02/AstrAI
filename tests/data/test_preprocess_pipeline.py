@@ -1,3 +1,4 @@
+import gzip
 import json
 import os
 
@@ -118,6 +119,28 @@ def test_full_text_pipeline(temp_dir, tokenizer_dir):
         meta = json.load(f)
     assert "sequence" in meta
     assert "loss_mask" not in meta
+
+
+def test_full_text_pipeline_reads_gzip_jsonl(temp_dir, tokenizer_dir):
+    jsonl_path = os.path.join(temp_dir, "text.jsonl.gz")
+    with gzip.open(jsonl_path, "wt", encoding="utf-8") as f:
+        f.write(json.dumps({"text": "compressed pretraining text"}) + "\n")
+
+    config = PipelineConfig(
+        input=InputConfig(sections=_TEXT_SECTIONS),
+        preprocessing=ProcessingConfig(max_seq_len=2048, min_chars=1),
+        output=OutputConfig(storage_format="bin"),
+    )
+    out_dir = os.path.join(temp_dir, "output")
+    Pipeline(
+        config=config,
+        input_paths=[jsonl_path],
+        output_dir=out_dir,
+        tokenizer_path=tokenizer_dir,
+    ).run()
+
+    meta_path = os.path.join(out_dir, "__default__", "shard_0000", "meta.json")
+    assert os.path.exists(meta_path)
 
 
 def test_full_instruction_pipeline(temp_dir, tokenizer_dir):
