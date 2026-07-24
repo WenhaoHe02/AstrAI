@@ -2,6 +2,7 @@
 
 import re
 import sys
+from importlib.metadata import PackageNotFoundError, version
 
 import torch
 
@@ -17,14 +18,24 @@ def main() -> None:
     errors = []
     torch_version = version_tuple(torch.__version__)
     cuda_version = version_tuple(torch.version.cuda or "")
-    nccl_version = torch.cuda.nccl.version() if torch.cuda.is_available() else ()
+    torch_nccl_version = (
+        torch.cuda.nccl.version() if torch.cuda.is_available() else ()
+    )
+    try:
+        runtime_nccl_text = version("nvidia-nccl-cu13")
+        runtime_nccl_version = version_tuple(runtime_nccl_text)
+    except PackageNotFoundError:
+        runtime_nccl_text = ".".join(map(str, torch_nccl_version))
+        runtime_nccl_version = tuple(torch_nccl_version)
 
     if torch_version < (2, 10, 0):
         errors.append(f"PyTorch >= 2.10 is required, found {torch.__version__}")
     if cuda_version < (12, 3, 0):
         errors.append(f"CUDA >= 12.3 is required, found {torch.version.cuda}")
-    if tuple(nccl_version) < (2, 30, 4):
-        errors.append(f"NCCL >= 2.30.4 is required, found {nccl_version}")
+    if runtime_nccl_version < (2, 30, 4):
+        errors.append(
+            f"NCCL runtime >= 2.30.4 is required, found {runtime_nccl_text}"
+        )
     if not torch.cuda.is_available():
         errors.append("CUDA is not available to PyTorch")
     elif torch.cuda.get_device_capability() < (9, 0):
@@ -48,7 +59,8 @@ def main() -> None:
         f"python={sys.version.split()[0]}",
         f"torch={torch.__version__}",
         f"cuda={torch.version.cuda}",
-        f"nccl={nccl_version}",
+        f"torch_nccl={torch_nccl_version}",
+        f"runtime_nccl={runtime_nccl_text}",
         f"deepep={deep_ep_version}",
     )
     if errors:

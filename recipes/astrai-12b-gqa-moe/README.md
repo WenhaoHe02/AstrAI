@@ -127,6 +127,12 @@ DeepEP V2 must be installed separately in the training environment. Before a
 formal run, execute both the correctness smoke test and the isolated routed
 expert benchmark on all eight GPUs:
 
+When PyTorch was compiled against an older NCCL than DeepEP's Gin runtime,
+leave `ASTRAI_DEEPEP_REUSE_NCCL_COMM=0` (the nightly default). This makes
+DeepEP create a communicator linked against its own NCCL runtime instead of
+reusing PyTorch's private communicator pointer. Only opt back into reuse after
+the two NCCL versions match and the eight-rank smoke test passes.
+
 ```bash
 python scripts/tools/check_deepep_env.py
 

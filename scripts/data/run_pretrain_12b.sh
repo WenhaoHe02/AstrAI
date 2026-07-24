@@ -16,6 +16,7 @@ swiglu_backend=${ASTRAI_SWIGLU_BACKEND:-liger}
 residual_norm_backend=${ASTRAI_RESIDUAL_NORM_BACKEND:-liger}
 router_score_dtype=${ASTRAI_ROUTER_SCORE_DTYPE:-fp32}
 route_scale_before_down=${ASTRAI_ROUTE_SCALE_BEFORE_DOWN:-1}
+deepep_reuse_nccl_comm=${ASTRAI_DEEPEP_REUSE_NCCL_COMM:-0}
 batch_per_device=${ASTRAI_BATCH_PER_DEVICE:-4}
 grad_accum_steps=${ASTRAI_GRAD_ACCUM_STEPS:-8}
 gradient_checkpoint_args=()
@@ -73,6 +74,7 @@ fi
 mkdir -p "$log_root" "$ckpt_root"
 rm -f "$stop_file"
 cd "$repo"
+export EP_REUSE_NCCL_COMM="$deepep_reuse_nccl_comm"
 
 nohup setsid "$train_python" scripts/tools/train.py \
     --nprocs=8 --parallel_mode=fsdp \

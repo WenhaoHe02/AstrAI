@@ -74,6 +74,7 @@ launch "$log_root/train-pretrain-12b-gqa.log" \
     "$curation_python" scripts/data/wait_and_run.py --pid "$preprocess_pid" \
     --require /mnt/nvme6/astrai/tokenized/pretrain-2048/_SUCCESS -- \
     /usr/bin/env PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True NCCL_DEBUG=WARN \
+    EP_REUSE_NCCL_COMM=0 \
     "$train_python" scripts/tools/train.py \
     --nprocs=8 --parallel_mode=fsdp \
     --fsdp_sharding_strategy=shard_grad_op --loss_backend=liger \

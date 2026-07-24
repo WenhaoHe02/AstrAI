@@ -67,6 +67,7 @@ class DeepEPDispatchState:
     num_max_tokens_per_rank: int
     expert_alignment: int = 1
     do_cpu_sync: bool = True
+    num_sms: int = 0
     handle: Any = None
     counts: list[int] | Tensor | None = None
 
@@ -108,6 +109,7 @@ class _Dispatch(torch.autograd.Function):
             do_expand=True,
             do_zero_padding=state.expert_alignment > 1,
             do_cpu_sync=state.do_cpu_sync,
+            num_sms=state.num_sms,
             async_with_compute_stream=False,
         )
         if recv_topk_weights is None:
@@ -131,6 +133,7 @@ class _Dispatch(torch.autograd.Function):
             grad_recv_x.contiguous(),
             handle=state.handle,
             topk_weights=grad_recv_topk_weights.float().contiguous(),
+            num_sms=state.num_sms,
             async_with_compute_stream=False,
         )
         return grad_x, None, grad_topk_weights, None
@@ -142,6 +145,7 @@ class _Combine(torch.autograd.Function):
         combined_x, _, _ = state.buffer.combine(
             x.contiguous(),
             handle=state.handle,
+            num_sms=state.num_sms,
             async_with_compute_stream=False,
         )
         ctx.state = state
@@ -154,6 +158,7 @@ class _Combine(torch.autograd.Function):
             grad_combined_x.contiguous(),
             handle=state.handle,
             do_zero_padding=state.expert_alignment > 1,
+            num_sms=state.num_sms,
             async_with_compute_stream=False,
         )
         return grad_x, None
@@ -179,18 +184,20 @@ def dispatch(
 
     num_tokens, hidden = x.shape
     num_topk = topk_idx.shape[1]
+    buffer = _get_buffer(
+        group,
+        num_tokens,
+        hidden,
+        num_topk,
+        prefer_overlap_with_compute,
+    )
     state = DeepEPDispatchState(
-        buffer=_get_buffer(
-            group,
-            num_tokens,
-            hidden,
-            num_topk,
-            prefer_overlap_with_compute,
-        ),
+        buffer=buffer,
         num_experts=num_experts,
         num_max_tokens_per_rank=num_tokens,
         expert_alignment=expert_alignment,
         do_cpu_sync=do_cpu_sync,
+        num_sms=buffer.get_theoretical_num_sms(num_experts, num_topk),
     )
     recv_x, recv_weights = _Dispatch.apply(x, topk_idx, topk_weights, state)
     if state.counts is None:

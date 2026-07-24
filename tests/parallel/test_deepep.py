@@ -10,6 +10,7 @@ class _FakeElasticBuffer:
     """Single-rank reference with the subset of ElasticBuffer used by the bridge."""
 
     def dispatch(self, x, topk_idx=None, topk_weights=None, handle=None, **kwargs):
+        assert kwargs["num_sms"] == 7
         if handle is None:
             num_tokens, num_topk = topk_idx.shape
             token_idx = torch.arange(num_tokens).repeat_interleave(num_topk)
@@ -32,6 +33,7 @@ class _FakeElasticBuffer:
         return recv_x, None, recv_weights, handle, None
 
     def combine(self, x, handle, topk_weights=None, **kwargs):
+        assert kwargs["num_sms"] == 7
         ungrouped = torch.empty_like(x)
         ungrouped[handle.order] = x
         output = x.new_zeros((handle.num_tokens, x.shape[-1]))
@@ -65,6 +67,7 @@ def test_deepep_bridge_forward_and_backward(monkeypatch, do_cpu_sync):
         num_experts=4,
         num_max_tokens_per_rank=x.shape[0],
         do_cpu_sync=do_cpu_sync,
+        num_sms=7,
     )
     recv_x, recv_weights = deepep._Dispatch.apply(x, topk_idx, weights, state)
     repeated_scale = expert_scale.repeat_interleave(
