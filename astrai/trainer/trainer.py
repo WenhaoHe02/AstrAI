@@ -1,4 +1,5 @@
 import logging
+import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -130,12 +131,19 @@ class Trainer:
             context.model.train()
             stop_requested = False
             step_metrics = _StepMetricAccumulator()
+            interval_started_at = time.perf_counter()
+            interval_tokens = 0
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats(get_current_device())
 
             for epoch in range(context.epoch, context.config.n_epoch):
                 context.epoch = epoch
                 self._call_callbacks("on_epoch_begin", context)
 
                 for batch in context.dataloader:
+                    input_ids = batch.get("input_ids")
+                    if isinstance(input_ids, torch.Tensor):
+                        interval_tokens += input_ids.numel() * context.world_size
                     with executor.accumulate(context.model):
                         self._call_callbacks("on_batch_begin", context)
                         loss = context.strategy(batch)
@@ -148,6 +156,22 @@ class Trainer:
                         self._call_callbacks("on_batch_end", context)
 
                         if executor.sync_gradients:
+                            now = time.perf_counter()
+                            context.step_time = now - interval_started_at
+                            if interval_tokens > 0:
+                                context.tokens_per_second = (
+                                    interval_tokens / context.step_time
+                                )
+                            if torch.cuda.is_available():
+                                context.peak_memory_gb = (
+                                    torch.cuda.max_memory_allocated(
+                                        get_current_device()
+                                    )
+                                    / 1e9
+                                )
+                                torch.cuda.reset_peak_memory_stats(get_current_device())
+                            interval_started_at = now
+                            interval_tokens = 0
                             step_metrics.materialize(context)
                             self._call_callbacks("on_optimizer_step", context)
                             context.optimizer.step()

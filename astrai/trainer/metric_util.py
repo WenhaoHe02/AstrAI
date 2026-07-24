@@ -68,3 +68,15 @@ def ctx_get_expert_load_max(ctx):
 
 def ctx_get_expert_load_cv(ctx):
     return ctx.expert_load_cv
+
+
+def ctx_get_step_time(ctx):
+    return ctx.step_time
+
+
+def ctx_get_tokens_per_second(ctx):
+    return ctx.tokens_per_second
+
+
+def ctx_get_peak_memory_gb(ctx):
+    return ctx.peak_memory_gb

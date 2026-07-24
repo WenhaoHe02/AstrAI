@@ -44,6 +44,9 @@ class TrainContext:
     expert_load_min: Optional[float] = field(default=None)
     expert_load_max: Optional[float] = field(default=None)
     expert_load_cv: Optional[float] = field(default=None)
+    step_time: Optional[float] = field(default=None)
+    tokens_per_second: Optional[float] = field(default=None)
+    peak_memory_gb: Optional[float] = field(default=None)
 
     world_size: int = field(default=1)
     rank: int = field(default=0)

@@ -24,10 +24,13 @@ from astrai.trainer.metric_util import (
     ctx_get_language_model_loss,
     ctx_get_loss,
     ctx_get_lr,
+    ctx_get_peak_memory_gb,
     ctx_get_router_aux_loss,
     ctx_get_router_entropy,
     ctx_get_router_loss,
     ctx_get_router_z_loss,
+    ctx_get_step_time,
+    ctx_get_tokens_per_second,
     ctx_get_val_loss,
 )
 from astrai.trainer.train_context import TrainContext
@@ -247,6 +250,10 @@ class ProgressBarCallback(TrainCallback):
         if context.router_loss is not None:
             postfix["router"] = f"{context.router_loss:.3e}"
             postfix["load_cv"] = f"{context.expert_load_cv:.2f}"
+        if context.tokens_per_second is not None:
+            postfix["tok/s"] = f"{context.tokens_per_second:,.0f}"
+        if context.peak_memory_gb is not None:
+            postfix["mem"] = f"{context.peak_memory_gb:.1f}G"
         self.progress_bar.set_postfix(postfix)
         self.progress_bar.update(1)
 
@@ -290,6 +297,9 @@ class MetricCallback(TrainCallback):
             "expert_load_min": ctx_get_expert_load_min,
             "expert_load_max": ctx_get_expert_load_max,
             "expert_load_cv": ctx_get_expert_load_cv,
+            "step_time": ctx_get_step_time,
+            "tokens_per_second": ctx_get_tokens_per_second,
+            "peak_memory_gb": ctx_get_peak_memory_gb,
         }
 
     def _metrics(self, context: TrainContext, names):

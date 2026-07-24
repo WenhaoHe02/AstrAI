@@ -88,7 +88,7 @@ launch "$log_root/train-pretrain-12b.log" \
     --log_dir="$log_root/train-pretrain-12b" \
     --metrics loss language_model_loss router_loss router_aux_loss \
     router_z_loss router_entropy expert_load_min expert_load_max \
-    expert_load_cv lr grad_norm
+    expert_load_cv step_time tokens_per_second peak_memory_gb lr grad_norm
 train_watcher_pid=$launched_pid
 
 pid_file="$log_root/pretrain-pipeline.pids"

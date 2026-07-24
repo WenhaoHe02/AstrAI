@@ -73,7 +73,7 @@ python scripts/tools/train.py \
   --max_grad_norm=1.0 \
   --schedule_type=wsd \
   --ckpt_interval=250 \
-  --metrics loss language_model_loss router_loss router_aux_loss router_z_loss router_entropy expert_load_min expert_load_max expert_load_cv lr grad_norm
+  --metrics loss language_model_loss router_loss router_aux_loss router_z_loss router_entropy expert_load_min expert_load_max expert_load_cv step_time tokens_per_second peak_memory_gb lr grad_norm
 ```
 
 This is a correctness recipe, not the final throughput configuration. Increase `batch_per_device` only after measuring peak memory, tokens/s, and router balance on the target node.
@@ -96,6 +96,11 @@ experts only keeps about 6.34GB of BF16 parameters resident per H200, so the
 memory probe disproves that budget, set `ASTRAI_BATCH_PER_DEVICE=1`,
 `ASTRAI_GRAD_ACCUM_STEPS=32`, and `ASTRAI_GRADIENT_CHECKPOINTING=1` to restore
 the conservative path without changing the effective batch.
+
+Use the logged `step_time`, global `tokens_per_second`, and `peak_memory_gb`
+after discarding the first two warmup optimizer steps. The acceptance gate is
+finite loss/gradients, healthy routing, no OOM, and a sustained step time below
+the existing 10.3-second baseline at the same 524,288 tokens per step.
 
 The selected `liger` loss backend uses Liger's fused linear cross-entropy, so
 the 2048x100K full-vocabulary logits and their roughly 0.82GB FP32 cast are not
