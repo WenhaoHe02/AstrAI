@@ -15,6 +15,7 @@
   "use_qk_norm": false,
   "use_gated_attention": false,
   "ffn_type": "moe",
+  "swiglu_backend": "liger",
   "n_routed_experts": 16,
   "n_shared_experts": 1,
   "n_activated_experts": 2,

@@ -294,6 +294,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--swiglu_backend",
+        type=str,
+        default=None,
+        choices=["torch", "liger"],
+        help=(
+            "Override the model SwiGLU activation backend. Liger fuses SiLU "
+            "and multiplication for shared and routed experts."
+        ),
+    )
+    parser.add_argument(
         "--deepep_cpu_sync",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -517,6 +527,7 @@ def train(
     pin_memory: bool,
     gradient_checkpointing: bool,
     loss_backend: str,
+    swiglu_backend: Optional[str],
     deepep_cpu_sync: Optional[bool],
     window_size: int,
     stride: int,
@@ -557,6 +568,8 @@ def train(
     config_path = os.path.join(param_path, "config.json")
     config = AutoRegressiveLMConfig.from_file(config_path)
     config.neftune_alpha = neftune_alpha
+    if swiglu_backend is not None:
+        config.swiglu_backend = swiglu_backend
     if deepep_cpu_sync is not None:
         config.deepep_cpu_sync = deepep_cpu_sync
 

@@ -205,6 +205,41 @@ def test_invalid_attention_backend_fails_during_model_construction():
         AutoRegressiveLM(config)
 
 
+def test_liger_swiglu_backend_keeps_cpu_reference_path():
+    config = AutoRegressiveLMConfig(
+        **TINY_CONFIG,
+        attn_type="gqa",
+        ffn_type="moe",
+        swiglu_backend="liger",
+        n_routed_experts=4,
+        n_shared_experts=1,
+        n_activated_experts=2,
+        topk_method="greedy",
+    )
+    model = AutoRegressiveLM(config).cpu()
+    input_ids = torch.randint(0, config.vocab_size, (2, 8))
+
+    output = model(input_ids)
+    output["logits"].float().mean().backward()
+
+    for layer in model.layers:
+        assert layer.mlp.shared_experts[0].swiglu_backend == "liger"
+        assert layer.mlp.routed_experts.swiglu_backend == "liger"
+    assert torch.isfinite(output["logits"]).all()
+
+
+def test_invalid_swiglu_backend_fails_during_model_construction():
+    config = AutoRegressiveLMConfig(
+        **TINY_CONFIG,
+        attn_type="gqa",
+        ffn_type="mlp",
+        swiglu_backend="unknown",
+    )
+
+    with pytest.raises(ValueError, match="swiglu_backend"):
+        AutoRegressiveLM(config)
+
+
 def test_liger_loss_backend_avoids_materializing_logits(monkeypatch):
     class FakeLigerFusedLinearCrossEntropyLoss:
         def __init__(self, label_smoothing=0.0):

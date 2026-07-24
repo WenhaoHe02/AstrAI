@@ -21,6 +21,7 @@ class BaseModelConfig(BaseConfig):
 
     model_type: Optional[str] = None
     neftune_alpha: float = 0.0
+    swiglu_backend: str = "torch"
 
 
 @dataclass

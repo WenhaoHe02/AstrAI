@@ -13,16 +13,42 @@ class FFNFactory(BaseFactory[nn.Module]):
     pass
 
 
+def apply_swiglu(gate: Tensor, up: Tensor, backend: str) -> Tensor:
+    """Apply SwiGLU without changing the surrounding parameter layout."""
+    if backend == "torch" or not gate.is_cuda:
+        return F.silu(gate) * up
+    if backend != "liger":
+        raise ValueError(f"swiglu_backend must be 'torch' or 'liger', got {backend!r}")
+    try:
+        from liger_kernel.ops import LigerSiLUMulFunction
+    except ImportError as exc:
+        raise RuntimeError(
+            "swiglu_backend='liger' requires the liger-kernel package"
+        ) from exc
+    return LigerSiLUMulFunction.apply(gate, up)
+
+
 @FFNFactory.register("mlp")
 class MLP(nn.Module):
-    def __init__(self, dim: int, dim_ffn: int, down_init_std: float = 0.02):
+    def __init__(
+        self,
+        dim: int,
+        dim_ffn: int,
+        down_init_std: float = 0.02,
+        swiglu_backend: str = "torch",
+    ):
         super().__init__()
+        if swiglu_backend not in ("torch", "liger"):
+            raise ValueError(
+                f"swiglu_backend must be 'torch' or 'liger', got {swiglu_backend!r}"
+            )
+        self.swiglu_backend = swiglu_backend
         self.up = Linear(dim, dim_ffn)
         self.gate = Linear(dim, dim_ffn)
         self.down = Linear(dim_ffn, dim, init_std=down_init_std)
 
     def forward(self, x: Tensor) -> Tensor:
-        gated = self.up(x) * F.silu(self.gate(x))
+        gated = apply_swiglu(self.gate(x), self.up(x), self.swiglu_backend)
         out = self.down(gated)
         return out
 
@@ -84,6 +110,7 @@ class GroupedExperts(nn.Module):
         n_experts: int,
         down_init_std: float,
         expert_parallel_size: int = 1,
+        swiglu_backend: str = "torch",
     ):
         super().__init__()
         if n_experts % expert_parallel_size != 0:
@@ -102,6 +129,11 @@ class GroupedExperts(nn.Module):
         self.expert_start = self.expert_parallel_rank * self.n_local_experts
         self.expert_end = self.expert_start + self.n_local_experts
         self.down_init_std = down_init_std
+        if swiglu_backend not in ("torch", "liger"):
+            raise ValueError(
+                f"swiglu_backend must be 'torch' or 'liger', got {swiglu_backend!r}"
+            )
+        self.swiglu_backend = swiglu_backend
 
         self.up_weight = nn.Parameter(torch.empty(self.n_local_experts, dim_ffn, dim))
         self.gate_weight = nn.Parameter(torch.empty(self.n_local_experts, dim_ffn, dim))
@@ -167,7 +199,7 @@ class GroupedExperts(nn.Module):
         offsets = counts.cumsum(0, dtype=torch.int32)
         up = self._grouped_mm(x, self.up_weight, offsets)
         gate = self._grouped_mm(x, self.gate_weight, offsets)
-        hidden = up * F.silu(gate)
+        hidden = apply_swiglu(gate, up, self.swiglu_backend)
         return self._grouped_mm(hidden, self.down_weight, offsets)
 
 
@@ -188,6 +220,7 @@ class DeepSeekMoE(nn.Module):
         deepep_overlap_with_compute: bool = False,
         deepep_cpu_sync: bool = True,
         moe_shared_expert_overlap: bool = False,
+        swiglu_backend: str = "torch",
     ):
         super().__init__()
         self.dim = dim
@@ -223,7 +256,12 @@ class DeepSeekMoE(nn.Module):
 
         self.shared_experts = nn.ModuleList(
             [
-                MLP(dim, dim_ffn, down_init_std=down_init_std)
+                MLP(
+                    dim,
+                    dim_ffn,
+                    down_init_std=down_init_std,
+                    swiglu_backend=swiglu_backend,
+                )
                 for _ in range(n_shared_experts)
             ]
         )
@@ -233,6 +271,7 @@ class DeepSeekMoE(nn.Module):
             n_routed_experts,
             down_init_std=down_init_std,
             expert_parallel_size=expert_parallel_size,
+            swiglu_backend=swiglu_backend,
         )
 
     def forward(self, x: Tensor):

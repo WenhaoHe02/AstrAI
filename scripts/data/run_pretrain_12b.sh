@@ -12,6 +12,7 @@ pid_file=${ASTRAI_TRAIN_PID_FILE:-$log_root/train-pretrain-12b.pid}
 log_file=${ASTRAI_TRAIN_LOG:-$log_root/train-pretrain-12b.log}
 fsdp_sharding=${ASTRAI_FSDP_SHARDING:-shard_grad_op}
 loss_backend=${ASTRAI_LOSS_BACKEND:-liger}
+swiglu_backend=${ASTRAI_SWIGLU_BACKEND:-liger}
 batch_per_device=${ASTRAI_BATCH_PER_DEVICE:-4}
 grad_accum_steps=${ASTRAI_GRAD_ACCUM_STEPS:-8}
 gradient_checkpoint_args=()
@@ -69,7 +70,8 @@ cd "$repo"
 nohup setsid "$train_python" scripts/tools/train.py \
     --nprocs=8 --parallel_mode=fsdp \
     --fsdp_sharding_strategy="$fsdp_sharding" \
-    --loss_backend="$loss_backend" --train_type=seq \
+    --loss_backend="$loss_backend" --swiglu_backend="$swiglu_backend" \
+    --train_type=seq \
     --data_root_path="$data_root" --param_path="$param_path" "${resume_args[@]}" \
     --batch_per_device="$batch_per_device" \
     --grad_accum_steps="$grad_accum_steps" "${gradient_checkpoint_args[@]}" \
