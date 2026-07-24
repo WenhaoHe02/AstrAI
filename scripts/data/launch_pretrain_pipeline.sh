@@ -76,7 +76,8 @@ launch "$log_root/train-pretrain-12b.log" \
     /usr/bin/env PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True NCCL_DEBUG=WARN \
     "$train_python" scripts/tools/train.py \
     --nprocs=8 --parallel_mode=fsdp \
-    --fsdp_sharding_strategy=shard_grad_op --loss_backend=liger --train_type=seq \
+    --fsdp_sharding_strategy=shard_grad_op --loss_backend=liger \
+    --swiglu_backend=liger --residual_norm_backend=liger --train_type=seq \
     --data_root_path=/mnt/nvme6/astrai/tokenized/pretrain-2048 \
     --param_path=params/astrai-12b-mqa-moe \
     --batch_per_device=4 --grad_accum_steps=8 \

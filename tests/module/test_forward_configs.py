@@ -296,6 +296,50 @@ def test_invalid_swiglu_backend_fails_during_model_construction():
         AutoRegressiveLM(config)
 
 
+def test_liger_residual_norm_backend_keeps_cpu_reference_path():
+    config = AutoRegressiveLMConfig(
+        **TINY_CONFIG,
+        attn_type="gqa",
+        ffn_type="mlp",
+        residual_norm_backend="liger",
+    )
+    reference_config = AutoRegressiveLMConfig(
+        **TINY_CONFIG,
+        attn_type="gqa",
+        ffn_type="mlp",
+        residual_norm_backend="torch",
+    )
+    torch.manual_seed(1234)
+    reference = AutoRegressiveLM(reference_config)
+    actual = AutoRegressiveLM(config)
+    actual.load_state_dict(reference.state_dict())
+    input_ids = torch.randint(0, config.vocab_size, (2, 8))
+
+    expected = reference(input_ids)["logits"]
+    output = actual(input_ids)["logits"]
+    expected.float().sum().backward()
+    output.float().sum().backward()
+
+    assert torch.equal(output, expected)
+    assert actual.state_dict().keys() == reference.state_dict().keys()
+    for actual_param, reference_param in zip(
+        actual.parameters(), reference.parameters(), strict=True
+    ):
+        assert torch.equal(actual_param.grad, reference_param.grad)
+
+
+def test_invalid_residual_norm_backend_fails_during_model_construction():
+    config = AutoRegressiveLMConfig(
+        **TINY_CONFIG,
+        attn_type="gqa",
+        ffn_type="mlp",
+        residual_norm_backend="unknown",
+    )
+
+    with pytest.raises(ValueError, match="residual_norm_backend"):
+        AutoRegressiveLM(config)
+
+
 def test_liger_loss_backend_avoids_materializing_logits(monkeypatch):
     class FakeLigerFusedLinearCrossEntropyLoss:
         def __init__(self, label_smoothing=0.0):

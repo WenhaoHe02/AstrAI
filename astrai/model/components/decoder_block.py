@@ -26,6 +26,12 @@ class DecoderBlock(nn.Module):
         self.attention = AttnFactory.create(config.attn_type, **cfg, layer_id=layer_id)
         self.input_norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.post_attention_norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
+        if config.residual_norm_backend not in ("torch", "liger"):
+            raise ValueError(
+                "residual_norm_backend must be 'torch' or 'liger', got "
+                f"{config.residual_norm_backend!r}"
+            )
+        self.residual_norm_backend = config.residual_norm_backend
         self.mlp = FFNFactory.create(config.ffn_type, **cfg)
 
     def forward(
@@ -44,8 +50,12 @@ class DecoderBlock(nn.Module):
             paged_cache,
             is_causal,
         )
-        x = attn_output + x
-        mlp_output = self.mlp(self.post_attention_norm(x))
+        normalized_x, x = self.post_attention_norm.forward_with_residual(
+            attn_output,
+            x,
+            self.residual_norm_backend,
+        )
+        mlp_output = self.mlp(normalized_x)
         router_outputs = None
         if isinstance(mlp_output, tuple):
             mlp_output, *router_outputs = mlp_output

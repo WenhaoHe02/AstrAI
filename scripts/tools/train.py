@@ -304,6 +304,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--residual_norm_backend",
+        type=str,
+        default=None,
+        choices=["torch", "liger"],
+        help=(
+            "Override the attention residual plus post-attention RMSNorm "
+            "backend. Liger performs both operations in one kernel."
+        ),
+    )
+    parser.add_argument(
         "--deepep_cpu_sync",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -528,6 +538,7 @@ def train(
     gradient_checkpointing: bool,
     loss_backend: str,
     swiglu_backend: Optional[str],
+    residual_norm_backend: Optional[str],
     deepep_cpu_sync: Optional[bool],
     window_size: int,
     stride: int,
@@ -570,6 +581,8 @@ def train(
     config.neftune_alpha = neftune_alpha
     if swiglu_backend is not None:
         config.swiglu_backend = swiglu_backend
+    if residual_norm_backend is not None:
+        config.residual_norm_backend = residual_norm_backend
     if deepep_cpu_sync is not None:
         config.deepep_cpu_sync = deepep_cpu_sync
 

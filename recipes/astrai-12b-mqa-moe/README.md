@@ -171,14 +171,16 @@ The checked-in recipe selects the mature Hopper-oriented path directly:
 - PyTorch fused Flash-SDPA for full-sequence causal MQA training;
 - DeepEP V2 expert dispatch with 128-token expert alignment;
 - DeepEP's compute-overlap mode and shared-expert side-stream overlap;
-- Liger fused SwiGLU for both shared and routed experts.
+- Liger fused SwiGLU for both shared and routed experts;
+- Liger fused attention-residual add plus post-attention RMSNorm.
 
 Flash-SDPA is forced on CUDA so an unsupported shape fails loudly instead of
 silently falling back to the slow math kernel. CPU development retains the
 automatic reference path. The SwiGLU backend is selected at launch so resumed
 checkpoints created before this option also use it; set
-`ASTRAI_SWIGLU_BACKEND=torch` for an immediate rollback. To roll back the full
-model recipe conservatively, set
+`ASTRAI_SWIGLU_BACKEND=torch` for an immediate rollback. To roll back the
+residual-norm fusion independently, set `ASTRAI_RESIDUAL_NORM_BACKEND=torch`.
+To roll back the full model recipe conservatively, set
 `attention_backend=auto`, `expert_dispatch_backend=torch`,
 `deepep_expert_alignment=1`, `deepep_overlap_with_compute=false`,
 `deepep_cpu_sync=true`, and `moe_shared_expert_overlap=false`.
@@ -191,6 +193,15 @@ python scripts/tools/benchmark_training_swiglu.py --backend torch --check
 python scripts/tools/benchmark_training_swiglu.py --backend liger --check
 python scripts/tools/benchmark_training_swiglu.py --backend torch --rows 2048
 python scripts/tools/benchmark_training_swiglu.py --backend liger --rows 2048
+```
+
+The residual-norm benchmark exercises both returned tensors and both backward
+paths, matching the decoder block rather than timing forward normalization
+alone:
+
+```bash
+python scripts/tools/benchmark_training_residual_norm.py --backend torch --check
+python scripts/tools/benchmark_training_residual_norm.py --backend liger --check
 ```
 
 An optional `--no-deepep_cpu_sync` training override uses fixed-capacity DeepEP
