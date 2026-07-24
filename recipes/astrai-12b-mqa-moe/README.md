@@ -69,7 +69,7 @@ python scripts/tools/train.py \
   --weight_decay=0.1 \
   --max_grad_norm=1.0 \
   --schedule_type=wsd \
-  --ckpt_interval=1000 \
+  --ckpt_interval=250 \
   --metrics loss language_model_loss router_loss router_aux_loss router_z_loss router_entropy expert_load_min expert_load_max expert_load_cv lr grad_norm
 ```
 
