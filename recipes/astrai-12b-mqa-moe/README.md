@@ -113,7 +113,46 @@ torchrun --standalone --nproc-per-node=8 \
 ```
 
 Do not start formal training unless the DeepEP smoke test has finite forward
-outputs and gradients and the benchmark beats the PyTorch fallback. Keep
-`deepep_overlap_with_compute` disabled for the synchronous dispatcher; enabling
-it deliberately reserves fewer SMs for communication and is only useful after
-shared-expert/communication overlap is enabled end to end.
+outputs and gradients. The checked-in recipe enables
+`deepep_overlap_with_compute` because shared-expert/communication overlap is
+wired end to end; disable both overlap flags together when isolating failures
+or comparing against the conservative path.
+
+## Selected Hopper fast path
+
+The checked-in recipe selects the mature Hopper-oriented path directly:
+
+- PyTorch fused Flash-SDPA for full-sequence causal MQA training;
+- DeepEP V2 expert dispatch with 128-token expert alignment;
+- DeepEP's compute-overlap mode and shared-expert side-stream overlap.
+
+Flash-SDPA is forced on CUDA so an unsupported shape fails loudly instead of
+silently falling back to the slow math kernel. CPU development retains the
+automatic reference path. To roll back conservatively, set
+`attention_backend=auto`, `expert_dispatch_backend=torch`,
+`deepep_expert_alignment=1`, `deepep_overlap_with_compute=false`, and
+`moe_shared_expert_overlap=false`.
+
+The 2048-token pretraining path is a full-sequence causal MQA workload, not a
+decode split-KV workload. The benchmark helper remains available for the first
+H200 validation window at the model's exact head shape:
+
+```bash
+python scripts/tools/benchmark_training_attention.py --backend torch-auto --check
+python scripts/tools/benchmark_training_attention.py --backend torch-flash --check
+python scripts/tools/benchmark_training_attention.py --backend flash-attn --check
+```
+
+## Router balancing policy
+
+Keep `router_aux_loss_coef=0.01` during the initial training window. The current
+greedy top-2 router uses Switch-style auxiliary balancing and does not yet have
+an aux-loss-free dynamic expert-bias controller, so setting the coefficient to
+zero can allow early expert collapse. Keep `router_z_loss_coef=0.001` to bound
+router logits.
+
+Watch an EMA of `expert_load_cv`, `expert_load_min`, and `expert_load_max`, not a
+single microbatch. After warmup, a persistent load CV above 0.3 or experts with
+near-zero load is a reason to keep or strengthen balancing. Only reduce the aux
+coefficient toward 0.001--0.005 after routing remains healthy for a sustained
+window.

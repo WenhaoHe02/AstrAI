@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from astrai.factory import BaseFactory
 from astrai.inference.core.cache import CacheView
@@ -39,6 +40,7 @@ class GQA(nn.Module):
         use_gated_attention: bool,
         layer_id: int,
         n_layers: int = 1,
+        attention_backend: str = "auto",
     ):
         super().__init__()
         assert dim % n_heads == 0
@@ -52,6 +54,12 @@ class GQA(nn.Module):
         self.n_rep = n_heads // n_kv_heads
         self.use_qk_norm = use_qk_norm
         self.use_gated_attention = use_gated_attention
+        self.attention_backend = attention_backend
+        if attention_backend not in ("auto", "flash_sdpa"):
+            raise ValueError(
+                "attention_backend must be 'auto' or 'flash_sdpa', got "
+                f"{attention_backend!r}"
+            )
 
         self.q_proj = Linear(dim, n_heads * self.head_dim)
         self.k_proj = Linear(dim, n_kv_heads * self.head_dim)
@@ -108,8 +116,9 @@ class GQA(nn.Module):
             k, v = paged_cache.gather(self.layer_id)
 
         q, k, v = q.permute(0, 2, 1, 3), k.permute(0, 2, 1, 3), v.permute(0, 2, 1, 3)
-        sdqa_out = (
-            F.scaled_dot_product_attention(
+
+        def run_sdpa():
+            return F.scaled_dot_product_attention(
                 q,
                 k,
                 v,
@@ -117,10 +126,16 @@ class GQA(nn.Module):
                 is_causal=is_causal,
                 enable_gqa=self.n_rep > 1,
             )
-            .permute(0, 2, 1, 3)
-            .contiguous()
-            .flatten(2)
-        )
+
+        if self.attention_backend == "flash_sdpa" and q.is_cuda:
+            # Fail loudly instead of silently selecting the math backend. The
+            # 12B Hopper recipe is shaped for fused Flash-SDPA training.
+            with sdpa_kernel(backends=[SDPBackend.FLASH_ATTENTION]):
+                attention_output = run_sdpa()
+        else:
+            attention_output = run_sdpa()
+
+        sdqa_out = attention_output.permute(0, 2, 1, 3).contiguous().flatten(2)
 
         if self.use_gated_attention:
             sdqa_out = sdqa_out * F.sigmoid(self.gate(x))

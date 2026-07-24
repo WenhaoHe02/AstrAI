@@ -171,3 +171,31 @@ def test_mqa_uses_native_gqa_sdpa(monkeypatch):
     input_ids = torch.randint(0, config.vocab_size, (2, 8))
     output = model(input_ids)
     assert output["logits"].shape == (2, 8, config.vocab_size)
+
+
+def test_flash_sdpa_backend_keeps_cpu_reference_path():
+    config = AutoRegressiveLMConfig(
+        **TINY_CONFIG,
+        attn_type="gqa",
+        attention_backend="flash_sdpa",
+        ffn_type="mlp",
+    )
+    model = AutoRegressiveLM(config)
+    input_ids = torch.randint(0, config.vocab_size, (2, 8))
+
+    output = model(input_ids)
+
+    assert output["logits"].shape == (2, 8, config.vocab_size)
+    assert torch.isfinite(output["logits"]).all()
+
+
+def test_invalid_attention_backend_fails_during_model_construction():
+    config = AutoRegressiveLMConfig(
+        **TINY_CONFIG,
+        attn_type="gqa",
+        attention_backend="unknown",
+        ffn_type="mlp",
+    )
+
+    with pytest.raises(ValueError, match="attention_backend"):
+        AutoRegressiveLM(config)

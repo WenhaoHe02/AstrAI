@@ -40,6 +40,7 @@ class AutoRegressiveLMConfig(BaseModelConfig):
     rope_scaling: Optional[dict] = None
 
     attn_type: str = "gqa"
+    attention_backend: str = "auto"
     num_attention_heads: Optional[int] = None
     num_key_value_heads: Optional[int] = None
     use_qk_norm: Optional[bool] = None
