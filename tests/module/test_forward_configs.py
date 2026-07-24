@@ -193,6 +193,58 @@ def test_moe_router_statistics_match_reference_formulas():
     assert torch.allclose(entropy, expected_entropy, atol=1e-6, rtol=1e-6)
 
 
+@pytest.mark.parametrize(
+    ("router_score_dtype", "expected_dtype"),
+    (("model", torch.bfloat16), ("fp32", torch.float32)),
+)
+def test_moe_topk_uses_configured_score_dtype(
+    monkeypatch, router_score_dtype, expected_dtype
+):
+    config = AutoRegressiveLMConfig(
+        **TINY_CONFIG,
+        attn_type="gqa",
+        ffn_type="moe",
+        n_routed_experts=4,
+        n_shared_experts=0,
+        n_activated_experts=2,
+        topk_method="greedy",
+        router_score_dtype=router_score_dtype,
+    )
+    moe = AutoRegressiveLM(config).layers[0].mlp.to(dtype=torch.bfloat16)
+    observed_dtypes = []
+    original_topk = torch.topk
+
+    def recording_topk(input, *args, **kwargs):
+        observed_dtypes.append(input.dtype)
+        return original_topk(input, *args, **kwargs)
+
+    monkeypatch.setattr(torch, "topk", recording_topk)
+    monkeypatch.setattr(
+        moe,
+        "_local_grouped_forward",
+        lambda assignment_x, _expert_idx: torch.zeros_like(assignment_x),
+    )
+    moe._routed_forward(torch.randn(16, config.hidden_size, dtype=torch.bfloat16))
+
+    assert observed_dtypes == [expected_dtype]
+
+
+def test_invalid_router_score_dtype_fails_during_model_construction():
+    config = AutoRegressiveLMConfig(
+        **TINY_CONFIG,
+        attn_type="gqa",
+        ffn_type="moe",
+        n_routed_experts=4,
+        n_shared_experts=1,
+        n_activated_experts=2,
+        topk_method="greedy",
+        router_score_dtype="unknown",
+    )
+
+    with pytest.raises(ValueError, match="router_score_dtype"):
+        AutoRegressiveLM(config)
+
+
 def test_single_shared_expert_returns_projection_without_extra_arithmetic():
     config = AutoRegressiveLMConfig(
         **TINY_CONFIG,

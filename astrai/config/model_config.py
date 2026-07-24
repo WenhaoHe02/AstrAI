@@ -63,6 +63,7 @@ class AutoRegressiveLMConfig(BaseModelConfig):
     deepep_overlap_with_compute: bool = False
     deepep_cpu_sync: bool = True
     moe_shared_expert_overlap: bool = False
+    router_score_dtype: str = "model"
     router_aux_loss_coef: float = 0.0
     router_z_loss_coef: float = 0.0
 

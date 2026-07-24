@@ -314,6 +314,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--router_score_dtype",
+        type=str,
+        default=None,
+        choices=["model", "fp32"],
+        help=(
+            "Override MoE routing score precision. fp32 avoids quantizing the "
+            "full probability matrix before top-k selection."
+        ),
+    )
+    parser.add_argument(
         "--deepep_cpu_sync",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -539,6 +549,7 @@ def train(
     loss_backend: str,
     swiglu_backend: Optional[str],
     residual_norm_backend: Optional[str],
+    router_score_dtype: Optional[str],
     deepep_cpu_sync: Optional[bool],
     window_size: int,
     stride: int,
@@ -583,6 +594,8 @@ def train(
         config.swiglu_backend = swiglu_backend
     if residual_norm_backend is not None:
         config.residual_norm_backend = residual_norm_backend
+    if router_score_dtype is not None:
+        config.router_score_dtype = router_score_dtype
     if deepep_cpu_sync is not None:
         config.deepep_cpu_sync = deepep_cpu_sync
 

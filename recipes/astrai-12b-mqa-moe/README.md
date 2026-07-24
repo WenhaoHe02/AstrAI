@@ -186,6 +186,12 @@ To roll back the full model recipe conservatively, set
 `deepep_expert_alignment=1`, `deepep_overlap_with_compute=false`,
 `deepep_cpu_sync=true`, and `moe_shared_expert_overlap=false`.
 
+Routing softmax, top-k selection, and normalization stay in FP32, matching the
+stable router path used by mature MoE implementations. Only the selected
+weights are cast to BF16 on the non-DeepEP fallback; DeepEP consumes FP32
+weights directly. Set `ASTRAI_ROUTER_SCORE_DTYPE=model` to reproduce the older
+BF16 top-k behavior.
+
 Compare the activation alone at the shared-expert shape (8192 rows) and the
 balanced routed-expert receive shape (2048 rows) before the first formal run:
 

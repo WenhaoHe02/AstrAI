@@ -221,6 +221,7 @@ class DeepSeekMoE(nn.Module):
         deepep_cpu_sync: bool = True,
         moe_shared_expert_overlap: bool = False,
         swiglu_backend: str = "torch",
+        router_score_dtype: str = "model",
     ):
         super().__init__()
         self.dim = dim
@@ -234,6 +235,12 @@ class DeepSeekMoE(nn.Module):
         self.deepep_overlap_with_compute = deepep_overlap_with_compute
         self.deepep_cpu_sync = deepep_cpu_sync
         self.moe_shared_expert_overlap = moe_shared_expert_overlap
+        if router_score_dtype not in ("model", "fp32"):
+            raise ValueError(
+                "router_score_dtype must be 'model' or 'fp32', got "
+                f"{router_score_dtype!r}"
+            )
+        self.router_score_dtype = router_score_dtype
 
         if expert_dispatch_backend not in ("torch", "deepep"):
             raise ValueError(
@@ -324,7 +331,11 @@ class DeepSeekMoE(nn.Module):
         router_logits = self.router(x)
         router_logits_fp32 = router_logits.float()
         router_probs_fp32 = torch.softmax(router_logits_fp32, dim=-1)
-        router_probs = router_probs_fp32.to(x.dtype)
+        router_probs = (
+            router_probs_fp32
+            if self.router_score_dtype == "fp32"
+            else router_probs_fp32.to(x.dtype)
+        )
 
         topk_weights, topk_indices = torch.topk(router_probs, K, dim=-1)
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
@@ -349,7 +360,7 @@ class DeepSeekMoE(nn.Module):
             output = self._deepep_forward(x, topk_indices, topk_weights.float())
         else:
             token_idx = torch.arange(N, device=x.device).repeat_interleave(K)
-            assignment_weights = topk_weights.reshape(-1)
+            assignment_weights = topk_weights.to(x.dtype).reshape(-1)
             if self.expert_parallel_size > 1:
                 assignment_output = self._expert_parallel_forward(
                     x[token_idx], expert_idx
