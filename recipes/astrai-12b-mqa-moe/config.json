@@ -22,6 +22,7 @@
   "expert_dispatch_backend": "deepep",
   "deepep_expert_alignment": 128,
   "deepep_overlap_with_compute": true,
+  "deepep_cpu_sync": true,
   "moe_shared_expert_overlap": true,
   "topk_method": "greedy",
   "router_aux_loss_coef": 0.01,

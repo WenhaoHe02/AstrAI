@@ -136,6 +136,9 @@ torchrun --standalone --nproc-per-node=8 \
   scripts/tools/smoke_expert_parallel.py --compare-backends
 torchrun --standalone --nproc-per-node=8 \
   scripts/tools/smoke_expert_parallel.py --compare-backends --shared-expert-overlap
+torchrun --standalone --nproc-per-node=8 \
+  scripts/tools/smoke_expert_parallel.py --compare-backends \
+  --shared-expert-overlap --no-cpu-sync
 
 torchrun --standalone --nproc-per-node=8 \
   scripts/tools/benchmark_expert_dispatch.py --backend torch
@@ -149,6 +152,10 @@ torchrun --standalone --nproc-per-node=8 \
 torchrun --standalone --nproc-per-node=8 \
   scripts/tools/benchmark_expert_dispatch.py --backend deepep \
   --shared-experts 1 --shared-expert-overlap --overlap-with-compute
+torchrun --standalone --nproc-per-node=8 \
+  scripts/tools/benchmark_expert_dispatch.py --backend deepep \
+  --expert-alignment 128 --shared-experts 1 --shared-expert-overlap \
+  --overlap-with-compute --no-cpu-sync
 ```
 
 Do not start formal training unless the DeepEP smoke test has finite forward
@@ -169,8 +176,16 @@ Flash-SDPA is forced on CUDA so an unsupported shape fails loudly instead of
 silently falling back to the slow math kernel. CPU development retains the
 automatic reference path. To roll back conservatively, set
 `attention_backend=auto`, `expert_dispatch_backend=torch`,
-`deepep_expert_alignment=1`, `deepep_overlap_with_compute=false`, and
-`moe_shared_expert_overlap=false`.
+`deepep_expert_alignment=1`, `deepep_overlap_with_compute=false`,
+`deepep_cpu_sync=true`, and `moe_shared_expert_overlap=false`.
+
+An optional `--no-deepep_cpu_sync` training override uses fixed-capacity DeepEP
+receive tensors and GPU-resident expert offsets to remove per-layer CPU shape
+synchronization. It is not the default for the B=4/no-checkpoint path: the
+worst-case receive capacity is 8x the balanced token count, and retaining those
+grouped-GEMM activations across 32 layers can erase H200's memory headroom. Gate
+it with the `--no-cpu-sync` expert smoke/benchmark above and the logged peak
+memory before enabling it for a formal run.
 
 The 2048-token pretraining path is a full-sequence causal MQA workload, not a
 decode split-KV workload. The benchmark helper remains available for the first

@@ -28,9 +28,11 @@
 | `--max_lr` | Maximum learning rate (cosine decay after warmup) | 3e-4 |
 | `--max_grad_norm` | Maximum gradient norm for clipping (None disables) | 1.0 |
 
-### Optimizer (MuonMix)
+### Optimizer (MatrixAwareOptimizer)
 
-Combined optimizer: matrix parameters via **Muon**, non-matrix via **AdamW** (`fused=True`).
+Visible, unsharded 2D hidden weights use **Muon**; all other parameters use
+**AdamW** (`fused=True`). FSDP1 exposes managed parameters as 1D shards at the
+optimizer boundary, so the distributed 12B recipe takes the fused AdamW path.
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|

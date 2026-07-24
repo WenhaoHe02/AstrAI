@@ -66,8 +66,23 @@ class DeepEPDispatchState:
     num_experts: int
     num_max_tokens_per_rank: int
     expert_alignment: int = 1
+    do_cpu_sync: bool = True
     handle: Any = None
-    counts: list[int] | None = None
+    counts: list[int] | Tensor | None = None
+
+
+def _counts_from_gpu_prefix(psum: Tensor, alignment: int) -> Tensor:
+    """Recover padded expert counts from DeepEP's expand-mode GPU prefix."""
+    aligned_ends = (
+        torch.div(
+            psum + alignment - 1,
+            alignment,
+            rounding_mode="floor",
+        )
+        * alignment
+    )
+    starts = torch.cat((torch.zeros_like(aligned_ends[:1]), aligned_ends[:-1]))
+    return aligned_ends - starts
 
 
 class _Dispatch(torch.autograd.Function):
@@ -92,14 +107,20 @@ class _Dispatch(torch.autograd.Function):
             expert_alignment=state.expert_alignment,
             do_expand=True,
             do_zero_padding=state.expert_alignment > 1,
-            do_cpu_sync=True,
+            do_cpu_sync=state.do_cpu_sync,
             async_with_compute_stream=False,
         )
         if recv_topk_weights is None:
             raise RuntimeError("DeepEP dispatch did not return routing weights")
 
         state.handle = handle
-        state.counts = handle.num_recv_tokens_per_expert_list
+        if state.do_cpu_sync:
+            state.counts = handle.num_recv_tokens_per_expert_list
+        else:
+            state.counts = _counts_from_gpu_prefix(
+                handle.psum_num_recv_tokens_per_expert,
+                state.expert_alignment,
+            )
         ctx.state = state
         return recv_x, recv_topk_weights
 
@@ -146,6 +167,7 @@ def dispatch(
     num_experts: int,
     expert_alignment: int = 1,
     prefer_overlap_with_compute: bool = False,
+    do_cpu_sync: bool = True,
 ) -> tuple[Tensor, Tensor, Tensor, DeepEPDispatchState]:
     """Expand and dispatch tokens, returning expert-grouped local tensors."""
     if not x.is_cuda or x.dtype != torch.bfloat16:
@@ -168,11 +190,12 @@ def dispatch(
         num_experts=num_experts,
         num_max_tokens_per_rank=num_tokens,
         expert_alignment=expert_alignment,
+        do_cpu_sync=do_cpu_sync,
     )
     recv_x, recv_weights = _Dispatch.apply(x, topk_idx, topk_weights, state)
     if state.counts is None:
         raise RuntimeError("DeepEP dispatch did not return expert token counts")
-    counts = torch.tensor(state.counts, dtype=torch.int64, device=x.device)
+    counts = torch.as_tensor(state.counts, dtype=torch.int64, device=x.device)
     return recv_x, recv_weights, counts, state
 
 

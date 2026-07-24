@@ -18,11 +18,19 @@ def parse_args():
         help="Compare Torch and DeepEP outputs and gradients with identical weights.",
     )
     parser.add_argument("--shared-expert-overlap", action="store_true")
+    parser.add_argument(
+        "--cpu-sync",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     return parser.parse_args()
 
 
 def build_model(
-    backend: str, device: int, shared_expert_overlap: bool = False
+    backend: str,
+    device: int,
+    shared_expert_overlap: bool = False,
+    cpu_sync: bool = True,
 ) -> DeepSeekMoE:
     model = DeepSeekMoE(
         dim=256,
@@ -33,6 +41,8 @@ def build_model(
         n_layers=2,
         expert_parallel_size=8,
         expert_dispatch_backend=backend,
+        deepep_expert_alignment=128 if not cpu_sync else 1,
+        deepep_cpu_sync=cpu_sync,
         moe_shared_expert_overlap=shared_expert_overlap,
     ).to(device=device, dtype=torch.bfloat16)
     model.apply(
@@ -64,7 +74,11 @@ def relative_l2(actual: torch.Tensor, expected: torch.Tensor) -> float:
 
 
 def compare_backends(
-    inputs: torch.Tensor, device: int, rank: int, shared_expert_overlap: bool
+    inputs: torch.Tensor,
+    device: int,
+    rank: int,
+    shared_expert_overlap: bool,
+    cpu_sync: bool,
 ) -> None:
     torch.manual_seed(1234)
     torch_model = build_model("torch", device)
@@ -72,7 +86,10 @@ def compare_backends(
 
     torch.manual_seed(1234)
     deepep_model = build_model(
-        "deepep", device, shared_expert_overlap=shared_expert_overlap
+        "deepep",
+        device,
+        shared_expert_overlap=shared_expert_overlap,
+        cpu_sync=cpu_sync,
     )
     deepep_model.load_state_dict(torch_model.state_dict())
     actual = run_model(deepep_model, inputs)
@@ -131,7 +148,13 @@ def main() -> None:
     )
 
     if args.compare_backends:
-        compare_backends(inputs, local_rank, rank, args.shared_expert_overlap)
+        compare_backends(
+            inputs,
+            local_rank,
+            rank,
+            args.shared_expert_overlap,
+            args.cpu_sync,
+        )
         dist.destroy_process_group()
         return
 
@@ -140,6 +163,7 @@ def main() -> None:
         args.backend,
         local_rank,
         shared_expert_overlap=args.shared_expert_overlap,
+        cpu_sync=args.cpu_sync,
     )
     output, loss, input_grad, expert_load, grads = run_model(model, inputs)
 
@@ -160,6 +184,7 @@ def main() -> None:
             "EP_GROUPED_GEMM_OK",
             f"backend={args.backend}",
             f"shared_overlap={args.shared_expert_overlap}",
+            f"cpu_sync={args.cpu_sync}",
             f"loss={loss.item():.6f}",
             f"load_min={global_load.min().item():.6f}",
             f"load_max={global_load.max().item():.6f}",

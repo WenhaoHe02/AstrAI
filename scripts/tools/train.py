@@ -1,4 +1,5 @@
 import argparse
+import logging
 import os
 from functools import partial
 from typing import Any, Callable, Dict, Optional
@@ -15,9 +16,11 @@ from astrai.model.components.decoder_block import DecoderBlock
 from astrai.trainer import SchedulerFactory, Trainer
 from astrai.trainer.rollout import BaseRewardModel
 
+logger = logging.getLogger(__name__)
 
-class MuonMix(optim.Optimizer):
-    """Combined Muon (matrix) + AdamW (non-matrix) optimizer."""
+
+class MatrixAwareOptimizer(optim.Optimizer):
+    """Fused AdamW with optional Muon for visible unsharded 2D weights."""
 
     def __init__(
         self,
@@ -81,6 +84,14 @@ class MuonMix(optim.Optimizer):
             *(self.muon.param_groups if self.muon is not None else []),
             *self.adamw.param_groups,
         ]
+        logger.info(
+            "MatrixAwareOptimizer: Muon params=%d (%.3fB), "
+            "fused AdamW params=%d (%.3fB)",
+            len(matrix_params),
+            sum(param.numel() for param in matrix_params) / 1e9,
+            len(other_params),
+            sum(param.numel() for param in other_params) / 1e9,
+        )
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -282,6 +293,15 @@ def parse_args() -> argparse.Namespace:
             "entropy without materializing full-vocabulary logits."
         ),
     )
+    parser.add_argument(
+        "--deepep_cpu_sync",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Override model DeepEP receive sizing. Disabling CPU sync uses "
+            "fixed-capacity tensors and GPU-resident expert offsets."
+        ),
+    )
 
     parser.add_argument(
         "--ckpt_interval",
@@ -444,8 +464,8 @@ def create_model(config):
     return AutoRegressiveLM(config).to(dtype=torch.bfloat16)
 
 
-def create_optimizer(model, **kwargs) -> MuonMix:
-    return MuonMix(model, **kwargs)
+def create_optimizer(model, **kwargs) -> MatrixAwareOptimizer:
+    return MatrixAwareOptimizer(model, **kwargs)
 
 
 def create_scheduler(
@@ -497,6 +517,7 @@ def train(
     pin_memory: bool,
     gradient_checkpointing: bool,
     loss_backend: str,
+    deepep_cpu_sync: Optional[bool],
     window_size: int,
     stride: int,
     nprocs: int,
@@ -536,6 +557,8 @@ def train(
     config_path = os.path.join(param_path, "config.json")
     config = AutoRegressiveLMConfig.from_file(config_path)
     config.neftune_alpha = neftune_alpha
+    if deepep_cpu_sync is not None:
+        config.deepep_cpu_sync = deepep_cpu_sync
 
     if window_size is None:
         window_size = config.max_position_embeddings
@@ -675,5 +698,9 @@ def train(
 
 
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     args = parse_args()
     train(**vars(args))

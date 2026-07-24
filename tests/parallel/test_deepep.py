@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from astrai.parallel import deepep
@@ -21,6 +22,7 @@ class _FakeElasticBuffer:
                 num_tokens=num_tokens,
                 num_topk=num_topk,
                 num_recv_tokens_per_expert_list=counts,
+                psum_num_recv_tokens_per_expert=torch.tensor(counts).cumsum(0),
             )
             recv_weights = topk_weights.reshape(-1)[order]
         else:
@@ -45,7 +47,8 @@ class _FakeElasticBuffer:
         return output, combined_weights, None
 
 
-def test_deepep_bridge_forward_and_backward(monkeypatch):
+@pytest.mark.parametrize("do_cpu_sync", [True, False])
+def test_deepep_bridge_forward_and_backward(monkeypatch, do_cpu_sync):
     monkeypatch.setattr(
         deepep,
         "_load_deep_ep",
@@ -61,10 +64,11 @@ def test_deepep_bridge_forward_and_backward(monkeypatch):
         buffer=_FakeElasticBuffer(),
         num_experts=4,
         num_max_tokens_per_rank=x.shape[0],
+        do_cpu_sync=do_cpu_sync,
     )
     recv_x, recv_weights = deepep._Dispatch.apply(x, topk_idx, weights, state)
     repeated_scale = expert_scale.repeat_interleave(
-        torch.tensor(state.counts, dtype=torch.int64)
+        torch.as_tensor(state.counts, dtype=torch.int64)
     )
     expert_out = recv_x * repeated_scale.unsqueeze(-1)
     actual = deepep._Combine.apply(expert_out * recv_weights.unsqueeze(-1), state)
@@ -87,3 +91,13 @@ def test_deepep_bridge_forward_and_backward(monkeypatch):
     reference.square().sum().backward()
     assert torch.allclose(actual_x_grad, x.grad)
     assert torch.allclose(actual_weight_grad, weights.grad)
+
+
+def test_no_cpu_sync_recovers_alignment_padded_gpu_counts():
+    # In expand mode DeepEP stores each actual end position and aligns the
+    # following expert's start. Grouped GEMM needs the padded segment lengths.
+    psum = torch.tensor([3, 6, 9, 15], dtype=torch.int32)
+
+    counts = deepep._counts_from_gpu_prefix(psum, alignment=4)
+
+    assert counts.tolist() == [4, 4, 4, 4]

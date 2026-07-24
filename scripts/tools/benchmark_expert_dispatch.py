@@ -21,6 +21,12 @@ def parse_args():
     parser.add_argument("--iters", type=int, default=10)
     parser.add_argument("--expert-alignment", type=int, default=1)
     parser.add_argument("--overlap-with-compute", action="store_true")
+    parser.add_argument(
+        "--cpu-sync",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Synchronize to size exact DeepEP receive tensors.",
+    )
     parser.add_argument("--shared-experts", type=int, default=0)
     parser.add_argument("--shared-expert-overlap", action="store_true")
     return parser.parse_args()
@@ -48,6 +54,7 @@ def main() -> None:
         expert_dispatch_backend=args.backend,
         deepep_expert_alignment=args.expert_alignment,
         deepep_overlap_with_compute=args.overlap_with_compute,
+        deepep_cpu_sync=args.cpu_sync,
         moe_shared_expert_overlap=args.shared_expert_overlap,
     ).to(device=local_rank, dtype=torch.bfloat16)
     model.apply(
@@ -92,6 +99,7 @@ def main() -> None:
             f"backend={args.backend}",
             f"alignment={args.expert_alignment}",
             f"overlap={args.overlap_with_compute}",
+            f"cpu_sync={args.cpu_sync}",
             f"shared_experts={args.shared_experts}",
             f"shared_overlap={args.shared_expert_overlap}",
             f"median_ms={median_ms:.3f}",

@@ -186,6 +186,7 @@ class DeepSeekMoE(nn.Module):
         expert_dispatch_backend: str = "torch",
         deepep_expert_alignment: int = 1,
         deepep_overlap_with_compute: bool = False,
+        deepep_cpu_sync: bool = True,
         moe_shared_expert_overlap: bool = False,
     ):
         super().__init__()
@@ -198,6 +199,7 @@ class DeepSeekMoE(nn.Module):
         self.expert_dispatch_backend = expert_dispatch_backend
         self.deepep_expert_alignment = deepep_expert_alignment
         self.deepep_overlap_with_compute = deepep_overlap_with_compute
+        self.deepep_cpu_sync = deepep_cpu_sync
         self.moe_shared_expert_overlap = moe_shared_expert_overlap
 
         if expert_dispatch_backend not in ("torch", "deepep"):
@@ -342,9 +344,22 @@ class DeepSeekMoE(nn.Module):
             self.n_routed_experts,
             expert_alignment=self.deepep_expert_alignment,
             prefer_overlap_with_compute=self.deepep_overlap_with_compute,
+            do_cpu_sync=self.deepep_cpu_sync,
         )
         expert_out = self.routed_experts(recv_x, counts)
-        weighted_out = expert_out * recv_weights.to(expert_out.dtype).unsqueeze(-1)
+        weighted_out = expert_out * recv_weights[: expert_out.size(0)].to(
+            expert_out.dtype
+        ).unsqueeze(-1)
+        if not state.do_cpu_sync:
+            valid_rows = (
+                torch.arange(expert_out.size(0), device=expert_out.device)
+                < counts.sum()
+            )
+            weighted_out = torch.where(
+                valid_rows.unsqueeze(-1),
+                weighted_out,
+                torch.zeros((), dtype=weighted_out.dtype, device=weighted_out.device),
+            )
         return combine(weighted_out, state)
 
     def _expert_parallel_forward(self, assignment_x: Tensor, expert_idx: Tensor):
