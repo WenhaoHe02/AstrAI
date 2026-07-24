@@ -51,6 +51,25 @@ class _FakeElasticBuffer:
         return output, combined_weights, None
 
 
+def test_deepep_buffer_enables_expand_weight_gradient_reduction(monkeypatch):
+    observed = {}
+
+    class FakeElasticBuffer:
+        def __init__(self, _group, **kwargs):
+            observed.update(kwargs)
+
+    monkeypatch.setattr(
+        deepep,
+        "_load_deep_ep",
+        lambda: SimpleNamespace(ElasticBuffer=FakeElasticBuffer),
+    )
+    deepep._BUFFER_CACHE.clear()
+    deepep._get_buffer(object(), 32, 256, 2, False)
+    deepep._BUFFER_CACHE.clear()
+
+    assert observed["allow_multiple_reduction"] is True
+
+
 @pytest.mark.parametrize("do_cpu_sync", [True, False])
 def test_deepep_bridge_forward_and_backward(monkeypatch, do_cpu_sync):
     monkeypatch.setattr(

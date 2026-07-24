@@ -51,7 +51,9 @@ def _get_buffer(
             num_topk=num_topk,
             use_fp8_dispatch=False,
             allow_hybrid_mode=False,
-            allow_multiple_reduction=False,
+            # Expand mode needs multiple reduction to carry top-k weight
+            # gradients through dispatch-backward's combine operation.
+            allow_multiple_reduction=True,
             prefer_overlap_with_compute=prefer_overlap_with_compute,
         )
         _BUFFER_CACHE[key] = buffer
