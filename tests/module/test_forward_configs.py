@@ -340,6 +340,32 @@ def test_invalid_residual_norm_backend_fails_during_model_construction():
         AutoRegressiveLM(config)
 
 
+def test_liger_backend_fuses_interblock_mlp_residuals(monkeypatch):
+    from astrai.model.components.norm import RMSNorm
+
+    calls = 0
+    original = RMSNorm.forward_with_residual
+
+    def counted(self, x, residual, backend="torch"):
+        nonlocal calls
+        calls += 1
+        return original(self, x, residual, backend)
+
+    monkeypatch.setattr(RMSNorm, "forward_with_residual", counted)
+    config = AutoRegressiveLMConfig(
+        **TINY_CONFIG,
+        attn_type="gqa",
+        ffn_type="mlp",
+        residual_norm_backend="liger",
+    )
+    model = AutoRegressiveLM(config)
+    model(torch.randint(0, config.vocab_size, (2, 8)))
+
+    # One attention residual per block plus one MLP residual at every
+    # inter-block boundary. The last MLP residual is added before final norm.
+    assert calls == 2 * config.num_hidden_layers - 1
+
+
 def test_liger_loss_backend_avoids_materializing_logits(monkeypatch):
     class FakeLigerFusedLinearCrossEntropyLoss:
         def __init__(self, label_smoothing=0.0):

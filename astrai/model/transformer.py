@@ -122,17 +122,43 @@ class AutoRegressiveLM(AutoModel):
         use_sdpa_causal_mask = attn_mask is None
 
         router_outputs = []
-        for layer in self.layers:
-            x, layer_router_outputs = layer(
-                x,
-                rotary_emb,
-                attn_mask,
-                paged_cache,
-                use_sdpa_causal_mask,
-                return_router_losses=True,
-            )
-            if layer_router_outputs is not None:
-                router_outputs.append(layer_router_outputs)
+        if self.config.residual_norm_backend == "liger":
+            deferred_residual = None
+            for layer in self.layers:
+                if deferred_residual is None:
+                    normalized_x = layer.input_norm(x)
+                else:
+                    normalized_x, x = layer.input_norm.forward_with_residual(
+                        x,
+                        deferred_residual,
+                        "liger",
+                    )
+                x, deferred_residual, layer_router_outputs = (
+                    layer._forward_from_normalized(
+                        x,
+                        normalized_x,
+                        rotary_emb,
+                        attn_mask,
+                        paged_cache,
+                        use_sdpa_causal_mask,
+                    )
+                )
+                if layer_router_outputs is not None:
+                    router_outputs.append(layer_router_outputs)
+            if deferred_residual is not None:
+                x = x + deferred_residual
+        else:
+            for layer in self.layers:
+                x, layer_router_outputs = layer(
+                    x,
+                    rotary_emb,
+                    attn_mask,
+                    paged_cache,
+                    use_sdpa_causal_mask,
+                    return_router_losses=True,
+                )
+                if layer_router_outputs is not None:
+                    router_outputs.append(layer_router_outputs)
 
         hidden_states = self.norm(x)
         output = {"hidden_states": hidden_states}

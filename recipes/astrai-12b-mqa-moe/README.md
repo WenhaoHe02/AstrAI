@@ -172,7 +172,8 @@ The checked-in recipe selects the mature Hopper-oriented path directly:
 - DeepEP V2 expert dispatch with 128-token expert alignment;
 - DeepEP's compute-overlap mode and shared-expert side-stream overlap;
 - Liger fused SwiGLU for both shared and routed experts;
-- Liger fused attention-residual add plus post-attention RMSNorm.
+- Liger fused residual-add plus RMSNorm after attention and across block
+  boundaries after the MLP.
 
 Flash-SDPA is forced on CUDA so an unsupported shape fails loudly instead of
 silently falling back to the slow math kernel. CPU development retains the

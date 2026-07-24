@@ -43,14 +43,38 @@ class DecoderBlock(nn.Module):
         is_causal: bool = False,
         return_router_losses: bool = False,
     ):
-        attn_output = self.attention(
+        mlp_output, residual, router_outputs = self._forward_from_normalized(
+            x,
             self.input_norm(x),
             rotary_emb,
             attention_mask,
             paged_cache,
             is_causal,
         )
-        normalized_x, x = self.post_attention_norm.forward_with_residual(
+        x = mlp_output + residual
+
+        if return_router_losses:
+            return x, router_outputs
+        return x
+
+    def _forward_from_normalized(
+        self,
+        x: Tensor,
+        normalized_x: Tensor,
+        rotary_emb: Tensor,
+        attention_mask: Optional[Tensor] = None,
+        paged_cache: Optional[CacheView] = None,
+        is_causal: bool = False,
+    ):
+        """Run a block while deferring the final MLP residual addition."""
+        attn_output = self.attention(
+            normalized_x,
+            rotary_emb,
+            attention_mask,
+            paged_cache,
+            is_causal,
+        )
+        normalized_x, residual = self.post_attention_norm.forward_with_residual(
             attn_output,
             x,
             self.residual_norm_backend,
@@ -59,8 +83,4 @@ class DecoderBlock(nn.Module):
         router_outputs = None
         if isinstance(mlp_output, tuple):
             mlp_output, *router_outputs = mlp_output
-        x = mlp_output + x
-
-        if return_router_losses:
-            return x, router_outputs
-        return x
+        return mlp_output, residual, router_outputs
