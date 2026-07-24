@@ -18,6 +18,7 @@
   "n_shared_experts": 1,
   "n_activated_experts": 2,
   "expert_parallel_size": 8,
+  "expert_dispatch_backend": "deepep",
   "topk_method": "greedy",
   "router_aux_loss_coef": 0.01,
   "router_z_loss_coef": 0.001

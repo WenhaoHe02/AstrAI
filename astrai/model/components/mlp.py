@@ -91,15 +91,9 @@ class GroupedExperts(nn.Module):
         self.expert_end = self.expert_start + self.n_local_experts
         self.down_init_std = down_init_std
 
-        self.up_weight = nn.Parameter(
-            torch.empty(self.n_local_experts, dim_ffn, dim)
-        )
-        self.gate_weight = nn.Parameter(
-            torch.empty(self.n_local_experts, dim_ffn, dim)
-        )
-        self.down_weight = nn.Parameter(
-            torch.empty(self.n_local_experts, dim, dim_ffn)
-        )
+        self.up_weight = nn.Parameter(torch.empty(self.n_local_experts, dim_ffn, dim))
+        self.gate_weight = nn.Parameter(torch.empty(self.n_local_experts, dim_ffn, dim))
+        self.down_weight = nn.Parameter(torch.empty(self.n_local_experts, dim, dim_ffn))
 
         # FSDP discovers this marker and leaves rank-local expert weights out
         # of data-parallel sharding.  Shared/router/attention parameters still
@@ -177,6 +171,7 @@ class DeepSeekMoE(nn.Module):
         topk_method: str = "greedy",
         n_layers: int = 1,
         expert_parallel_size: int = 1,
+        expert_dispatch_backend: str = "torch",
     ):
         super().__init__()
         self.dim = dim
@@ -185,15 +180,20 @@ class DeepSeekMoE(nn.Module):
         self.n_activated_experts = n_activated_experts
         self.topk_method = topk_method or "greedy"
         self.expert_parallel_size = expert_parallel_size
+        self.expert_dispatch_backend = expert_dispatch_backend
+
+        if expert_dispatch_backend not in ("torch", "deepep"):
+            raise ValueError(
+                "expert_dispatch_backend must be 'torch' or 'deepep', got "
+                f"{expert_dispatch_backend!r}"
+            )
+        if expert_dispatch_backend == "deepep" and expert_parallel_size == 1:
+            raise ValueError("DeepEP dispatch requires expert_parallel_size > 1")
 
         if self.topk_method != "greedy":
-            raise ValueError(
-                f"Unsupported MoE top-k method: {self.topk_method!r}"
-            )
+            raise ValueError(f"Unsupported MoE top-k method: {self.topk_method!r}")
         if not 0 < n_activated_experts <= n_routed_experts:
-            raise ValueError(
-                "n_activated_experts must be in [1, n_routed_experts]"
-            )
+            raise ValueError("n_activated_experts must be in [1, n_routed_experts]")
 
         self.router = Linear(dim, n_routed_experts, bias=False)
         moe_scale = 1 / max(n_shared_experts, 1) + 1 / n_activated_experts
@@ -244,14 +244,10 @@ class DeepSeekMoE(nn.Module):
 
         # Switch-style differentiable load-balancing loss.  Expert load is
         # measured over all top-k assignments, so a uniform router has loss 1.
-        assignments = F.one_hot(
-            topk_indices, num_classes=self.n_routed_experts
-        ).float()
+        assignments = F.one_hot(topk_indices, num_classes=self.n_routed_experts).float()
         expert_load = assignments.mean(dim=(0, 1))
         mean_router_prob = router_probs_fp32.mean(dim=0)
-        aux_loss = self.n_routed_experts * torch.sum(
-            expert_load * mean_router_prob
-        )
+        aux_loss = self.n_routed_experts * torch.sum(expert_load * mean_router_prob)
         z_loss = torch.logsumexp(router_logits_fp32, dim=-1).square().mean()
         router_entropy = -torch.sum(
             router_probs_fp32
@@ -263,21 +259,20 @@ class DeepSeekMoE(nn.Module):
         expert_idx = topk_indices.reshape(-1)
         assignment_weights = topk_weights.reshape(-1)
 
-        if self.expert_parallel_size > 1:
-            assignment_output = self._expert_parallel_forward(
-                x[token_idx], expert_idx
-            )
+        if self.expert_dispatch_backend == "deepep":
+            output = self._deepep_forward(x, topk_indices, topk_weights.float())
+        elif self.expert_parallel_size > 1:
+            assignment_output = self._expert_parallel_forward(x[token_idx], expert_idx)
         else:
-            assignment_output = self._local_grouped_forward(
-                x[token_idx], expert_idx
-            )
+            assignment_output = self._local_grouped_forward(x[token_idx], expert_idx)
 
-        output = torch.zeros(N, D, device=x.device, dtype=x.dtype)
-        output.index_add_(
-            0,
-            token_idx,
-            assignment_output * assignment_weights.unsqueeze(-1),
-        )
+        if self.expert_dispatch_backend != "deepep":
+            output = torch.zeros(N, D, device=x.device, dtype=x.dtype)
+            output.index_add_(
+                0,
+                token_idx,
+                assignment_output * assignment_weights.unsqueeze(-1),
+            )
 
         return (
             output,
@@ -295,6 +290,22 @@ class DeepSeekMoE(nn.Module):
         output = torch.empty_like(grouped_out)
         output[order] = grouped_out
         return output
+
+    def _deepep_forward(
+        self, x: Tensor, topk_indices: Tensor, topk_weights: Tensor
+    ) -> Tensor:
+        from astrai.parallel.deepep import combine, dispatch
+
+        recv_x, recv_weights, counts, state = dispatch(
+            x,
+            topk_indices,
+            topk_weights,
+            self.routed_experts.process_group,
+            self.n_routed_experts,
+        )
+        expert_out = self.routed_experts(recv_x, counts)
+        weighted_out = expert_out * recv_weights.to(expert_out.dtype).unsqueeze(-1)
+        return combine(weighted_out, state)
 
     def _expert_parallel_forward(self, assignment_x: Tensor, expert_idx: Tensor):
         ep_size = self.expert_parallel_size

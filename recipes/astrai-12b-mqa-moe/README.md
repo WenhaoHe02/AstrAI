@@ -5,6 +5,7 @@ This recipe defines a 12.155B-total, 3.171B-active decoder model:
 - 32 layers, hidden size 3072, 24 query heads, one KV head (MQA)
 - 16 routed experts, one shared expert, top-2 routing
 - 8-way expert parallelism (two routed experts per H200) with grouped GEMM
+- DeepEP V2 expand dispatch/combine for the EP communication path
 - expert intermediate size 2176
 - 100K vocabulary with untied input/output embeddings
 - 2048-token bulk pretraining windows; the model retains a 32K RoPE limit for a later context-extension stage
@@ -74,3 +75,28 @@ python scripts/tools/train.py \
 ```
 
 This is a correctness recipe, not the final throughput configuration. Increase `batch_per_device` only after measuring peak memory, tokens/s, and router balance on the target node.
+
+## DeepEP validation
+
+The 12B recipe sets `expert_dispatch_backend` to `deepep`. AstrAI uses the
+DeepEP V2 `ElasticBuffer` API in expand mode, so received tokens arrive grouped
+by local expert and feed the existing grouped GEMM directly. The original
+PyTorch all-to-all implementation remains available by setting the backend to
+`torch`.
+
+DeepEP V2 must be installed separately in the training environment. Before a
+formal run, execute both the correctness smoke test and the isolated routed
+expert benchmark on all eight GPUs:
+
+```bash
+torchrun --standalone --nproc-per-node=8 \
+  scripts/tools/smoke_expert_parallel.py --backend deepep
+
+torchrun --standalone --nproc-per-node=8 \
+  scripts/tools/benchmark_expert_dispatch.py --backend torch
+torchrun --standalone --nproc-per-node=8 \
+  scripts/tools/benchmark_expert_dispatch.py --backend deepep
+```
+
+Do not start formal training unless the DeepEP smoke test has finite forward
+outputs and gradients and the benchmark beats the PyTorch fallback.

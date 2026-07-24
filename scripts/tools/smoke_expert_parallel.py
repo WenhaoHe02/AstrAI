@@ -1,5 +1,6 @@
 """Eight-GPU forward/backward smoke test for expert-parallel grouped GEMM."""
 
+import argparse
 import os
 
 import torch
@@ -8,7 +9,14 @@ import torch.distributed as dist
 from astrai.model.components.mlp import DeepSeekMoE
 
 
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--backend", choices=("torch", "deepep"), default="torch")
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = parse_args()
     dist.init_process_group("nccl")
     rank = dist.get_rank()
     world_size = dist.get_world_size()
@@ -26,11 +34,12 @@ def main() -> None:
         n_activated_experts=2,
         n_layers=2,
         expert_parallel_size=8,
+        expert_dispatch_backend=args.backend,
     ).to(device=local_rank, dtype=torch.bfloat16)
     model.apply(
-        lambda module: module.reset_parameters()
-        if hasattr(module, "reset_parameters")
-        else None
+        lambda module: (
+            module.reset_parameters() if hasattr(module, "reset_parameters") else None
+        )
     )
 
     torch.manual_seed(10_000 + rank)
@@ -62,6 +71,7 @@ def main() -> None:
     if rank == 0:
         print(
             "EP_GROUPED_GEMM_OK",
+            f"backend={args.backend}",
             f"loss={loss.item():.6f}",
             f"load_min={global_load.min().item():.6f}",
             f"load_max={global_load.max().item():.6f}",

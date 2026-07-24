@@ -55,6 +55,7 @@ class AutoRegressiveLMConfig(BaseModelConfig):
     n_activated_experts: Optional[int] = None
     topk_method: Optional[str] = None
     expert_parallel_size: int = 1
+    expert_dispatch_backend: str = "torch"
     router_aux_loss_coef: float = 0.0
     router_z_loss_coef: float = 0.0
 
