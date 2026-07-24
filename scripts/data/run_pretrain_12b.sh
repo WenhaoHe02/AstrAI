@@ -12,6 +12,12 @@ pid_file=${ASTRAI_TRAIN_PID_FILE:-$log_root/train-pretrain-12b.pid}
 log_file=${ASTRAI_TRAIN_LOG:-$log_root/train-pretrain-12b.log}
 fsdp_sharding=${ASTRAI_FSDP_SHARDING:-shard_grad_op}
 loss_backend=${ASTRAI_LOSS_BACKEND:-liger}
+batch_per_device=${ASTRAI_BATCH_PER_DEVICE:-4}
+grad_accum_steps=${ASTRAI_GRAD_ACCUM_STEPS:-8}
+gradient_checkpoint_args=()
+if [[ ${ASTRAI_GRADIENT_CHECKPOINTING:-0} == 1 ]]; then
+    gradient_checkpoint_args=(--gradient_checkpointing)
+fi
 
 if pgrep -f 'scripts/tools/train.py.*pretrain-2048' >/dev/null; then
     echo 'AstrAI pretraining is already running.' >&2
@@ -65,7 +71,8 @@ nohup setsid "$train_python" scripts/tools/train.py \
     --fsdp_sharding_strategy="$fsdp_sharding" \
     --loss_backend="$loss_backend" --train_type=seq \
     --data_root_path="$data_root" --param_path="$param_path" "${resume_args[@]}" \
-    --batch_per_device=1 --grad_accum_steps=32 --gradient_checkpointing \
+    --batch_per_device="$batch_per_device" \
+    --grad_accum_steps="$grad_accum_steps" "${gradient_checkpoint_args[@]}" \
     --window_size=2048 --n_epoch=1 --num_workers=4 \
     --warmup_ratio=0.01 --max_lr=2e-4 --weight_decay=0.1 \
     --max_grad_norm=1.0 --schedule_type=wsd --ckpt_interval=250 \

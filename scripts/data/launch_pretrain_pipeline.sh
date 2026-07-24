@@ -79,7 +79,7 @@ launch "$log_root/train-pretrain-12b.log" \
     --fsdp_sharding_strategy=shard_grad_op --loss_backend=liger --train_type=seq \
     --data_root_path=/mnt/nvme6/astrai/tokenized/pretrain-2048 \
     --param_path=params/astrai-12b-mqa-moe \
-    --batch_per_device=1 --grad_accum_steps=32 --gradient_checkpointing \
+    --batch_per_device=4 --grad_accum_steps=8 \
     --window_size=2048 --n_epoch=1 --num_workers=4 \
     --warmup_ratio=0.01 --max_lr=2e-4 --weight_decay=0.1 \
     --max_grad_norm=1.0 --schedule_type=wsd --ckpt_interval=250 \

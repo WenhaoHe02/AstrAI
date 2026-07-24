@@ -87,6 +87,16 @@ pressure from activation checkpoint recomputation. Set
 `ASTRAI_FSDP_SHARDING=full_shard` in the nightly launcher for the lower-memory
 rollback path.
 
+The nightly fast path uses `batch_per_device=4`, `grad_accum_steps=8`, and no
+activation checkpointing. This preserves the previous 524,288 tokens per
+optimizer step (`8 x 4 x 8 x 2048`) while reducing the number of Python,
+DeepEP, and loss launches from 32 microbatches to 8. ZeRO-2 plus rank-local
+experts only keeps about 6.34GB of BF16 parameters resident per H200, so the
+141GB cards have ample room to retain block activations. If the first exact
+memory probe disproves that budget, set `ASTRAI_BATCH_PER_DEVICE=1`,
+`ASTRAI_GRAD_ACCUM_STEPS=32`, and `ASTRAI_GRADIENT_CHECKPOINTING=1` to restore
+the conservative path without changing the effective batch.
+
 The selected `liger` loss backend uses Liger's fused linear cross-entropy, so
 the 2048x100K full-vocabulary logits and their roughly 0.82GB FP32 cast are not
 materialized. Install `liger-kernel==0.8.1` in the training environment before
