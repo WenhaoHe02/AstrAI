@@ -89,14 +89,31 @@ formal run, execute both the correctness smoke test and the isolated routed
 expert benchmark on all eight GPUs:
 
 ```bash
+python scripts/tools/check_deepep_env.py
+
 torchrun --standalone --nproc-per-node=8 \
   scripts/tools/smoke_expert_parallel.py --backend deepep
+torchrun --standalone --nproc-per-node=8 \
+  scripts/tools/smoke_expert_parallel.py --compare-backends
+torchrun --standalone --nproc-per-node=8 \
+  scripts/tools/smoke_expert_parallel.py --compare-backends --shared-expert-overlap
 
 torchrun --standalone --nproc-per-node=8 \
   scripts/tools/benchmark_expert_dispatch.py --backend torch
 torchrun --standalone --nproc-per-node=8 \
   scripts/tools/benchmark_expert_dispatch.py --backend deepep
+torchrun --standalone --nproc-per-node=8 \
+  scripts/tools/benchmark_expert_dispatch.py --backend deepep --expert-alignment 128
+torchrun --standalone --nproc-per-node=8 \
+  scripts/tools/benchmark_expert_dispatch.py --backend deepep \
+  --shared-experts 1 --shared-expert-overlap
+torchrun --standalone --nproc-per-node=8 \
+  scripts/tools/benchmark_expert_dispatch.py --backend deepep \
+  --shared-experts 1 --shared-expert-overlap --overlap-with-compute
 ```
 
 Do not start formal training unless the DeepEP smoke test has finite forward
-outputs and gradients and the benchmark beats the PyTorch fallback.
+outputs and gradients and the benchmark beats the PyTorch fallback. Keep
+`deepep_overlap_with_compute` disabled for the synchronous dispatcher; enabling
+it deliberately reserves fewer SMs for communication and is only useful after
+shared-expert/communication overlap is enabled end to end.

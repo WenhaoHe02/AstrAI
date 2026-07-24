@@ -19,6 +19,10 @@ def parse_args():
     parser.add_argument("--ffn-hidden", type=int, default=2176)
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--iters", type=int, default=10)
+    parser.add_argument("--expert-alignment", type=int, default=1)
+    parser.add_argument("--overlap-with-compute", action="store_true")
+    parser.add_argument("--shared-experts", type=int, default=0)
+    parser.add_argument("--shared-expert-overlap", action="store_true")
     return parser.parse_args()
 
 
@@ -37,11 +41,14 @@ def main() -> None:
         dim=args.hidden,
         dim_ffn=args.ffn_hidden,
         n_routed_experts=16,
-        n_shared_experts=0,
+        n_shared_experts=args.shared_experts,
         n_activated_experts=2,
         n_layers=32,
         expert_parallel_size=8,
         expert_dispatch_backend=args.backend,
+        deepep_expert_alignment=args.expert_alignment,
+        deepep_overlap_with_compute=args.overlap_with_compute,
+        moe_shared_expert_overlap=args.shared_expert_overlap,
     ).to(device=local_rank, dtype=torch.bfloat16)
     model.apply(
         lambda module: (
@@ -83,6 +90,10 @@ def main() -> None:
         print(
             "EXPERT_DISPATCH_BENCH",
             f"backend={args.backend}",
+            f"alignment={args.expert_alignment}",
+            f"overlap={args.overlap_with_compute}",
+            f"shared_experts={args.shared_experts}",
+            f"shared_overlap={args.shared_expert_overlap}",
             f"median_ms={median_ms:.3f}",
             f"p90_ms={sorted(elapsed_ms)[int(0.9 * (len(elapsed_ms) - 1))]:.3f}",
             f"tokens_per_second={tokens_per_second:.1f}",

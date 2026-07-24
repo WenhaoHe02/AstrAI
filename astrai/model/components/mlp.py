@@ -28,6 +28,18 @@ class MLP(nn.Module):
 
 
 _EP_GROUP_CACHE: dict[tuple[int, int], tuple[object, int]] = {}
+_SHARED_EXPERT_STREAM_CACHE: dict[int, torch.cuda.Stream] = {}
+
+
+def _shared_expert_stream(device: torch.device) -> torch.cuda.Stream:
+    device_index = device.index
+    if device_index is None:
+        device_index = torch.cuda.current_device()
+    stream = _SHARED_EXPERT_STREAM_CACHE.get(device_index)
+    if stream is None:
+        stream = torch.cuda.Stream(device=device_index)
+        _SHARED_EXPERT_STREAM_CACHE[device_index] = stream
+    return stream
 
 
 def _expert_parallel_group(size: int):
@@ -172,6 +184,9 @@ class DeepSeekMoE(nn.Module):
         n_layers: int = 1,
         expert_parallel_size: int = 1,
         expert_dispatch_backend: str = "torch",
+        deepep_expert_alignment: int = 1,
+        deepep_overlap_with_compute: bool = False,
+        moe_shared_expert_overlap: bool = False,
     ):
         super().__init__()
         self.dim = dim
@@ -181,6 +196,9 @@ class DeepSeekMoE(nn.Module):
         self.topk_method = topk_method or "greedy"
         self.expert_parallel_size = expert_parallel_size
         self.expert_dispatch_backend = expert_dispatch_backend
+        self.deepep_expert_alignment = deepep_expert_alignment
+        self.deepep_overlap_with_compute = deepep_overlap_with_compute
+        self.moe_shared_expert_overlap = moe_shared_expert_overlap
 
         if expert_dispatch_backend not in ("torch", "deepep"):
             raise ValueError(
@@ -189,6 +207,8 @@ class DeepSeekMoE(nn.Module):
             )
         if expert_dispatch_backend == "deepep" and expert_parallel_size == 1:
             raise ValueError("DeepEP dispatch requires expert_parallel_size > 1")
+        if deepep_expert_alignment < 1:
+            raise ValueError("deepep_expert_alignment must be positive")
 
         if self.topk_method != "greedy":
             raise ValueError(f"Unsupported MoE top-k method: {self.topk_method!r}")
@@ -217,10 +237,28 @@ class DeepSeekMoE(nn.Module):
         bsz, seq_len, dim = x.shape
         x_flat = x.view(-1, dim)
 
-        shared_out = self._shared_forward(x_flat)
-        routed_out, aux_loss, z_loss, expert_load, router_entropy = (
-            self._routed_forward(x_flat)
-        )
+        if (
+            self.moe_shared_expert_overlap
+            and self.n_shared_experts > 0
+            and x_flat.is_cuda
+        ):
+            current_stream = torch.cuda.current_stream(x_flat.device)
+            shared_stream = _shared_expert_stream(x_flat.device)
+            shared_stream.wait_stream(current_stream)
+            with torch.cuda.stream(shared_stream):
+                shared_out = self._shared_forward(x_flat)
+                x_flat.record_stream(shared_stream)
+
+            routed_out, aux_loss, z_loss, expert_load, router_entropy = (
+                self._routed_forward(x_flat)
+            )
+            current_stream.wait_stream(shared_stream)
+            shared_out.record_stream(current_stream)
+        else:
+            shared_out = self._shared_forward(x_flat)
+            routed_out, aux_loss, z_loss, expert_load, router_entropy = (
+                self._routed_forward(x_flat)
+            )
 
         out = (shared_out + routed_out).view(bsz, seq_len, dim)
         return out, aux_loss, z_loss, expert_load, router_entropy
@@ -302,6 +340,8 @@ class DeepSeekMoE(nn.Module):
             topk_weights,
             self.routed_experts.process_group,
             self.n_routed_experts,
+            expert_alignment=self.deepep_expert_alignment,
+            prefer_overlap_with_compute=self.deepep_overlap_with_compute,
         )
         expert_out = self.routed_experts(recv_x, counts)
         weighted_out = expert_out * recv_weights.to(expert_out.dtype).unsqueeze(-1)

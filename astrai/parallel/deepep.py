@@ -10,7 +10,7 @@ import torch.distributed as dist
 from torch import Tensor
 
 
-_BUFFER_CACHE: dict[tuple[int, int, int, int], Any] = {}
+_BUFFER_CACHE: dict[tuple[int, int, int, int, bool], Any] = {}
 
 
 def _load_deep_ep():
@@ -32,8 +32,15 @@ def _get_buffer(
     num_max_tokens_per_rank: int,
     hidden: int,
     num_topk: int,
+    prefer_overlap_with_compute: bool,
 ):
-    key = (id(group), num_max_tokens_per_rank, hidden, num_topk)
+    key = (
+        id(group),
+        num_max_tokens_per_rank,
+        hidden,
+        num_topk,
+        prefer_overlap_with_compute,
+    )
     buffer = _BUFFER_CACHE.get(key)
     if buffer is None:
         deep_ep = _load_deep_ep()
@@ -45,7 +52,7 @@ def _get_buffer(
             use_fp8_dispatch=False,
             allow_hybrid_mode=False,
             allow_multiple_reduction=False,
-            prefer_overlap_with_compute=True,
+            prefer_overlap_with_compute=prefer_overlap_with_compute,
         )
         _BUFFER_CACHE[key] = buffer
     return buffer
@@ -84,6 +91,7 @@ class _Dispatch(torch.autograd.Function):
             num_max_tokens_per_rank=state.num_max_tokens_per_rank,
             expert_alignment=state.expert_alignment,
             do_expand=True,
+            do_zero_padding=state.expert_alignment > 1,
             do_cpu_sync=True,
             async_with_compute_stream=False,
         )
@@ -124,6 +132,7 @@ class _Combine(torch.autograd.Function):
         grad_x, _, _, _, _ = state.buffer.dispatch(
             grad_combined_x.contiguous(),
             handle=state.handle,
+            do_zero_padding=state.expert_alignment > 1,
             async_with_compute_stream=False,
         )
         return grad_x, None
@@ -135,19 +144,30 @@ def dispatch(
     topk_weights: Tensor,
     group: dist.ProcessGroup,
     num_experts: int,
+    expert_alignment: int = 1,
+    prefer_overlap_with_compute: bool = False,
 ) -> tuple[Tensor, Tensor, Tensor, DeepEPDispatchState]:
     """Expand and dispatch tokens, returning expert-grouped local tensors."""
     if not x.is_cuda or x.dtype != torch.bfloat16:
         raise RuntimeError("DeepEP dispatch requires CUDA BF16 hidden states")
     if group is None:
         raise RuntimeError("DeepEP dispatch requires an expert process group")
+    if expert_alignment < 1:
+        raise ValueError("DeepEP expert alignment must be positive")
 
     num_tokens, hidden = x.shape
     num_topk = topk_idx.shape[1]
     state = DeepEPDispatchState(
-        buffer=_get_buffer(group, num_tokens, hidden, num_topk),
+        buffer=_get_buffer(
+            group,
+            num_tokens,
+            hidden,
+            num_topk,
+            prefer_overlap_with_compute,
+        ),
         num_experts=num_experts,
         num_max_tokens_per_rank=num_tokens,
+        expert_alignment=expert_alignment,
     )
     recv_x, recv_weights = _Dispatch.apply(x, topk_idx, topk_weights, state)
     if state.counts is None:

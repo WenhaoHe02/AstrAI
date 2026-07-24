@@ -19,6 +19,9 @@
   "n_activated_experts": 2,
   "expert_parallel_size": 8,
   "expert_dispatch_backend": "deepep",
+  "deepep_expert_alignment": 1,
+  "deepep_overlap_with_compute": false,
+  "moe_shared_expert_overlap": false,
   "topk_method": "greedy",
   "router_aux_loss_coef": 0.01,
   "router_z_loss_coef": 0.001
