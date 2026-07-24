@@ -11,6 +11,8 @@ class _FakeElasticBuffer:
 
     def dispatch(self, x, topk_idx=None, topk_weights=None, handle=None, **kwargs):
         assert kwargs["num_sms"] == 7
+        if handle is not None:
+            assert kwargs["do_expand"] is True
         if handle is None:
             num_tokens, num_topk = topk_idx.shape
             token_idx = torch.arange(num_tokens).repeat_interleave(num_topk)

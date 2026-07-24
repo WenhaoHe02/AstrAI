@@ -157,6 +157,7 @@ class _Combine(torch.autograd.Function):
         grad_x, _, _, _, _ = state.buffer.dispatch(
             grad_combined_x.contiguous(),
             handle=state.handle,
+            do_expand=True,
             do_zero_padding=state.expert_alignment > 1,
             num_sms=state.num_sms,
             async_with_compute_stream=False,
