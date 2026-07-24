@@ -14,6 +14,12 @@ from astrai.model.components.mlp import DeepSeekMoE
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--backend", choices=("torch", "deepep"), required=True)
+    parser.add_argument(
+        "--scale-before-down",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply route weights before the expert down projection.",
+    )
     parser.add_argument("--tokens", type=int, default=2048)
     parser.add_argument("--hidden", type=int, default=3072)
     parser.add_argument("--ffn-hidden", type=int, default=2176)
@@ -55,6 +61,7 @@ def main() -> None:
         deepep_expert_alignment=args.expert_alignment,
         deepep_overlap_with_compute=args.overlap_with_compute,
         deepep_cpu_sync=args.cpu_sync,
+        moe_route_scale_before_down=args.scale_before_down,
         moe_shared_expert_overlap=args.shared_expert_overlap,
     ).to(device=local_rank, dtype=torch.bfloat16)
     model.apply(
@@ -100,6 +107,7 @@ def main() -> None:
             f"alignment={args.expert_alignment}",
             f"overlap={args.overlap_with_compute}",
             f"cpu_sync={args.cpu_sync}",
+            f"scale_before_down={args.scale_before_down}",
             f"shared_experts={args.shared_experts}",
             f"shared_overlap={args.shared_expert_overlap}",
             f"median_ms={median_ms:.3f}",

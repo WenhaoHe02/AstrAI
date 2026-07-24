@@ -192,6 +192,14 @@ weights are cast to BF16 on the non-DeepEP fallback; DeepEP consumes FP32
 weights directly. Set `ASTRAI_ROUTER_SCORE_DTYPE=model` to reproduce the older
 BF16 top-k behavior.
 
+On the DeepEP path, routing weights are applied to the 2176-wide SwiGLU
+activation before the bias-free down projection instead of to its 3072-wide
+output. The operations are algebraically equivalent, while the row-scaling
+kernel moves about 29% fewer elements. Compare
+`--scale-before-down` against `--no-scale-before-down` with the expert dispatch
+benchmark before formal training. Set `ASTRAI_ROUTE_SCALE_BEFORE_DOWN=0` to
+restore the original post-projection placement without changing checkpoints.
+
 Compare the activation alone at the shared-expert shape (8192 rows) and the
 balanced routed-expert receive shape (2048 rows) before the first formal run:
 

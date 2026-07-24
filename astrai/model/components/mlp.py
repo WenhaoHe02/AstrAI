@@ -195,11 +195,23 @@ class GroupedExperts(nn.Module):
             return x.new_empty((0, weight.size(1)))
         return torch.cat(chunks, dim=0)
 
-    def forward(self, x: Tensor, counts: Tensor) -> Tensor:
+    def forward(
+        self,
+        x: Tensor,
+        counts: Tensor,
+        row_scale: Tensor | None = None,
+    ) -> Tensor:
         offsets = counts.cumsum(0, dtype=torch.int32)
         up = self._grouped_mm(x, self.up_weight, offsets)
         gate = self._grouped_mm(x, self.gate_weight, offsets)
         hidden = apply_swiglu(gate, up, self.swiglu_backend)
+        if row_scale is not None:
+            if row_scale.ndim != 1 or row_scale.size(0) != hidden.size(0):
+                raise ValueError("row_scale must have one value per expert input row")
+            # Scaling commutes with the bias-free down projection.  Applying
+            # routing weights at the smaller FFN width reduces the row-scale
+            # kernel's memory traffic versus scaling the model-width output.
+            hidden = hidden * row_scale.to(hidden.dtype).unsqueeze(-1)
         return self._grouped_mm(hidden, self.down_weight, offsets)
 
 
@@ -220,6 +232,7 @@ class DeepSeekMoE(nn.Module):
         deepep_overlap_with_compute: bool = False,
         deepep_cpu_sync: bool = True,
         moe_shared_expert_overlap: bool = False,
+        moe_route_scale_before_down: bool = False,
         swiglu_backend: str = "torch",
         router_score_dtype: str = "model",
     ):
@@ -235,6 +248,7 @@ class DeepSeekMoE(nn.Module):
         self.deepep_overlap_with_compute = deepep_overlap_with_compute
         self.deepep_cpu_sync = deepep_cpu_sync
         self.moe_shared_expert_overlap = moe_shared_expert_overlap
+        self.moe_route_scale_before_down = moe_route_scale_before_down
         if router_score_dtype not in ("model", "fp32"):
             raise ValueError(
                 "router_score_dtype must be 'model' or 'fp32', got "
@@ -408,10 +422,17 @@ class DeepSeekMoE(nn.Module):
             prefer_overlap_with_compute=self.deepep_overlap_with_compute,
             do_cpu_sync=self.deepep_cpu_sync,
         )
-        expert_out = self.routed_experts(recv_x, counts)
-        weighted_out = expert_out * recv_weights[: expert_out.size(0)].to(
-            expert_out.dtype
-        ).unsqueeze(-1)
+        recv_weights = recv_weights[: recv_x.size(0)]
+        if self.moe_route_scale_before_down:
+            expert_out = self.routed_experts(
+                recv_x,
+                counts,
+                row_scale=recv_weights,
+            )
+            weighted_out = expert_out
+        else:
+            expert_out = self.routed_experts(recv_x, counts)
+            weighted_out = expert_out * recv_weights.to(expert_out.dtype).unsqueeze(-1)
         if not state.do_cpu_sync:
             valid_rows = (
                 torch.arange(expert_out.size(0), device=expert_out.device)

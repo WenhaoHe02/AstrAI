@@ -15,11 +15,16 @@ loss_backend=${ASTRAI_LOSS_BACKEND:-liger}
 swiglu_backend=${ASTRAI_SWIGLU_BACKEND:-liger}
 residual_norm_backend=${ASTRAI_RESIDUAL_NORM_BACKEND:-liger}
 router_score_dtype=${ASTRAI_ROUTER_SCORE_DTYPE:-fp32}
+route_scale_before_down=${ASTRAI_ROUTE_SCALE_BEFORE_DOWN:-1}
 batch_per_device=${ASTRAI_BATCH_PER_DEVICE:-4}
 grad_accum_steps=${ASTRAI_GRAD_ACCUM_STEPS:-8}
 gradient_checkpoint_args=()
 if [[ ${ASTRAI_GRADIENT_CHECKPOINTING:-0} == 1 ]]; then
     gradient_checkpoint_args=(--gradient_checkpointing)
+fi
+route_scale_args=(--moe_route_scale_before_down)
+if [[ "$route_scale_before_down" == 0 ]]; then
+    route_scale_args=(--no-moe_route_scale_before_down)
 fi
 
 if pgrep -f 'scripts/tools/train.py.*pretrain-2048' >/dev/null; then
@@ -75,6 +80,7 @@ nohup setsid "$train_python" scripts/tools/train.py \
     --loss_backend="$loss_backend" --swiglu_backend="$swiglu_backend" \
     --residual_norm_backend="$residual_norm_backend" \
     --router_score_dtype="$router_score_dtype" \
+    "${route_scale_args[@]}" \
     --train_type=seq \
     --data_root_path="$data_root" --param_path="$param_path" "${resume_args[@]}" \
     --batch_per_device="$batch_per_device" \

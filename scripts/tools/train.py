@@ -332,6 +332,15 @@ def parse_args() -> argparse.Namespace:
             "fixed-capacity tensors and GPU-resident expert offsets."
         ),
     )
+    parser.add_argument(
+        "--moe_route_scale_before_down",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Override routing-weight placement for DeepEP experts. Enabling "
+            "scales the narrower SwiGLU activation before the down projection."
+        ),
+    )
 
     parser.add_argument(
         "--ckpt_interval",
@@ -551,6 +560,7 @@ def train(
     residual_norm_backend: Optional[str],
     router_score_dtype: Optional[str],
     deepep_cpu_sync: Optional[bool],
+    moe_route_scale_before_down: Optional[bool],
     window_size: int,
     stride: int,
     nprocs: int,
@@ -598,6 +608,8 @@ def train(
         config.router_score_dtype = router_score_dtype
     if deepep_cpu_sync is not None:
         config.deepep_cpu_sync = deepep_cpu_sync
+    if moe_route_scale_before_down is not None:
+        config.moe_route_scale_before_down = moe_route_scale_before_down
 
     if window_size is None:
         window_size = config.max_position_embeddings

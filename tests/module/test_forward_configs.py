@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from astrai.config.model_config import AutoRegressiveLMConfig
+from astrai.model.components.mlp import GroupedExperts
 from astrai.model.transformer import AutoRegressiveLM
 
 TINY_CONFIG = dict(
@@ -265,6 +266,42 @@ def test_single_shared_expert_returns_projection_without_extra_arithmetic():
     moe.shared_experts[0] = SentinelExpert()
 
     assert moe._shared_forward(torch.randn_like(sentinel)) is sentinel
+
+
+def test_grouped_expert_row_scale_commutes_with_down_projection():
+    experts = GroupedExperts(
+        dim=8,
+        dim_ffn=5,
+        n_experts=2,
+        down_init_std=0.02,
+    )
+    experts.reset_parameters()
+    x = torch.randn(7, 8)
+    counts = torch.tensor([3, 4])
+    row_scale = torch.rand(7)
+
+    unscaled = experts(x, counts)
+    scaled_before_down = experts(x, counts, row_scale=row_scale)
+
+    assert torch.allclose(
+        scaled_before_down,
+        unscaled * row_scale.unsqueeze(-1),
+        atol=1e-6,
+        rtol=1e-5,
+    )
+
+
+def test_grouped_expert_rejects_invalid_row_scale_shape():
+    experts = GroupedExperts(
+        dim=8,
+        dim_ffn=5,
+        n_experts=2,
+        down_init_std=0.02,
+    )
+    experts.reset_parameters()
+
+    with pytest.raises(ValueError, match="one value per expert input row"):
+        experts(torch.randn(7, 8), torch.tensor([3, 4]), row_scale=torch.rand(6))
 
 
 def test_mqa_uses_native_gqa_sdpa(monkeypatch):

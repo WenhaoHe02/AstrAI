@@ -26,6 +26,7 @@
   "deepep_overlap_with_compute": true,
   "deepep_cpu_sync": true,
   "moe_shared_expert_overlap": true,
+  "moe_route_scale_before_down": true,
   "router_score_dtype": "fp32",
   "topk_method": "greedy",
   "router_aux_loss_coef": 0.01,
