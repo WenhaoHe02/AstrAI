@@ -159,6 +159,39 @@ def test_moe_router_loss_backpropagates_to_router():
         assert grad.abs().sum() > 0
 
 
+def test_moe_router_statistics_match_reference_formulas():
+    config = AutoRegressiveLMConfig(
+        **TINY_CONFIG,
+        attn_type="gqa",
+        ffn_type="moe",
+        n_routed_experts=4,
+        n_shared_experts=1,
+        n_activated_experts=2,
+        topk_method="greedy",
+    )
+    moe = AutoRegressiveLM(config).layers[0].mlp
+    x = torch.randn(16, config.hidden_size)
+
+    with torch.no_grad():
+        _, _, _, expert_load, entropy = moe._routed_forward(x)
+        logits = moe.router(x).float()
+        probabilities = torch.softmax(logits, dim=-1)
+        topk_indices = torch.topk(
+            probabilities.to(x.dtype), config.n_activated_experts, dim=-1
+        ).indices
+        expected_load = (
+            F.one_hot(topk_indices, num_classes=config.n_routed_experts)
+            .float()
+            .mean(dim=(0, 1))
+        )
+        expected_entropy = -torch.sum(
+            probabilities * torch.log(probabilities), dim=-1
+        ).mean()
+
+    assert torch.equal(expert_load, expected_load)
+    assert torch.allclose(entropy, expected_entropy, atol=1e-6, rtol=1e-6)
+
+
 def test_mqa_uses_native_gqa_sdpa(monkeypatch):
     import astrai.model.components.attention as attention_module
 

@@ -321,31 +321,35 @@ class DeepSeekMoE(nn.Module):
         topk_weights, topk_indices = torch.topk(router_probs, K, dim=-1)
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
 
-        # Switch-style differentiable load-balancing loss.  Expert load is
-        # measured over all top-k assignments, so a uniform router has loss 1.
-        assignments = F.one_hot(topk_indices, num_classes=self.n_routed_experts).float()
-        expert_load = assignments.mean(dim=(0, 1))
+        # Switch-style differentiable load-balancing loss. Expert load is a
+        # non-differentiable routing statistic; bincount avoids materializing
+        # the [tokens, top-k, experts] one-hot tensor on every layer.
+        expert_idx = topk_indices.reshape(-1)
+        expert_load = torch.bincount(expert_idx, minlength=self.n_routed_experts).to(
+            router_probs_fp32.dtype
+        )
+        expert_load = expert_load / (N * K)
         mean_router_prob = router_probs_fp32.mean(dim=0)
         aux_loss = self.n_routed_experts * torch.sum(expert_load * mean_router_prob)
-        z_loss = torch.logsumexp(router_logits_fp32, dim=-1).square().mean()
-        router_entropy = -torch.sum(
-            router_probs_fp32
-            * torch.log(router_probs_fp32.clamp_min(torch.finfo(torch.float32).tiny)),
-            dim=-1,
+        router_logsumexp = torch.logsumexp(router_logits_fp32, dim=-1)
+        z_loss = router_logsumexp.square().mean()
+        router_entropy = (
+            router_logsumexp - torch.sum(router_probs_fp32 * router_logits_fp32, dim=-1)
         ).mean()
-
-        token_idx = torch.arange(N, device=x.device).repeat_interleave(K)
-        expert_idx = topk_indices.reshape(-1)
-        assignment_weights = topk_weights.reshape(-1)
 
         if self.expert_dispatch_backend == "deepep":
             output = self._deepep_forward(x, topk_indices, topk_weights.float())
-        elif self.expert_parallel_size > 1:
-            assignment_output = self._expert_parallel_forward(x[token_idx], expert_idx)
         else:
-            assignment_output = self._local_grouped_forward(x[token_idx], expert_idx)
-
-        if self.expert_dispatch_backend != "deepep":
+            token_idx = torch.arange(N, device=x.device).repeat_interleave(K)
+            assignment_weights = topk_weights.reshape(-1)
+            if self.expert_parallel_size > 1:
+                assignment_output = self._expert_parallel_forward(
+                    x[token_idx], expert_idx
+                )
+            else:
+                assignment_output = self._local_grouped_forward(
+                    x[token_idx], expert_idx
+                )
             output = torch.zeros(N, D, device=x.device, dtype=x.dtype)
             output.index_add_(
                 0,
