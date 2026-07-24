@@ -32,6 +32,7 @@ urls = { Homepage = "https://github.com/ViperEkura/AstrAI" }
 
 [project.optional-dependencies]
 dev = ["pytest==9.0.2", "ruff"]
+training-kernels = ["liger-kernel==0.8.1"]
 
 [tool.setuptools.packages.find]
 where = ["."]

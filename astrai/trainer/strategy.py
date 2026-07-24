@@ -1,7 +1,7 @@
 """Training strategy implementations with factory pattern."""
 
 from abc import ABC, abstractmethod
-from typing import Callable, Dict, Optional, Union
+from typing import Callable, Dict, Union
 
 import torch
 import torch.nn as nn
@@ -114,13 +114,16 @@ class BaseStrategy(ABC):
         self.executor = kwargs.pop("executor", None)
         self.extra_kwargs = kwargs
         self._rollout_runner = None
-        self.last_metrics: Dict[str, float] = {}
+        # Keep metrics as detached device tensors. The trainer batches their
+        # host transfer at the optimizer boundary so gradient accumulation
+        # does not introduce a GPU synchronization for every scalar metric.
+        self.last_metrics: Dict[str, Tensor] = {}
 
     def combine_model_loss(
         self, outputs: Dict[str, Tensor], language_model_loss: Tensor
     ) -> Tensor:
         """Add optional MoE router losses and expose detached train metrics."""
-        self.last_metrics = {"language_model_loss": language_model_loss.detach().item()}
+        self.last_metrics = {"language_model_loss": language_model_loss.detach()}
         router_loss = outputs.get("router_loss")
         if router_loss is None:
             return language_model_loss
@@ -129,13 +132,13 @@ class BaseStrategy(ABC):
         load_mean = expert_load.mean()
         load_cv = expert_load.std(unbiased=False) / load_mean.clamp_min(1e-12)
         self.last_metrics.update(
-            router_loss=router_loss.detach().item(),
-            router_aux_loss=outputs["router_aux_loss"].detach().item(),
-            router_z_loss=outputs["router_z_loss"].detach().item(),
-            router_entropy=outputs["router_entropy"].detach().item(),
-            expert_load_min=expert_load.min().item(),
-            expert_load_max=expert_load.max().item(),
-            expert_load_cv=load_cv.item(),
+            router_loss=router_loss.detach(),
+            router_aux_loss=outputs["router_aux_loss"].detach(),
+            router_z_loss=outputs["router_z_loss"].detach(),
+            router_entropy=outputs["router_entropy"].detach(),
+            expert_load_min=expert_load.min(),
+            expert_load_max=expert_load.max(),
+            expert_load_cv=load_cv,
         )
         return language_model_loss + router_loss
 
@@ -231,22 +234,35 @@ class SEQStrategy(BaseStrategy):
         model: Union[nn.Module, Callable[..., Dict[str, Tensor]]],
         device: str,
         label_smoothing: float = 0.0,
+        loss_backend: str = "torch",
         **kwargs,
     ):
         super().__init__(model, device, **kwargs)
         self.label_smoothing = label_smoothing
+        self.loss_backend = loss_backend
+        if loss_backend not in ("torch", "liger"):
+            raise ValueError(
+                f"loss_backend must be 'torch' or 'liger', got {loss_backend!r}"
+            )
 
     def compute_loss(self, batch: Dict[str, Tensor]) -> Tensor:
         batch = move_to_device(batch, self.device)
         input_ids, target_ids = batch["input_ids"], batch["target_ids"]
-        outputs = self.model(input_ids=input_ids)
-        logits = outputs["logits"]
-
-        loss = F.cross_entropy(
-            input=logits.flatten(0, 1).float(),
-            target=target_ids.flatten(),
+        outputs = self.model(
+            input_ids=input_ids,
+            target_ids=target_ids if self.loss_backend == "liger" else None,
+            loss_backend=self.loss_backend,
             label_smoothing=self.label_smoothing,
         )
+        if self.loss_backend == "liger":
+            loss = outputs["language_model_loss"]
+        else:
+            logits = outputs["logits"]
+            loss = F.cross_entropy(
+                input=logits.flatten(0, 1).float(),
+                target=target_ids.flatten(),
+                label_smoothing=self.label_smoothing,
+            )
 
         return self.combine_model_loss(outputs, loss)
 

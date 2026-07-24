@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, Optional
 import torch
 import torch.optim as optim
 from torch import Tensor, nn
+from torch.distributed.fsdp import ShardingStrategy
 
 from astrai.config import AutoRegressiveLMConfig, TrainConfig
 from astrai.dataset import DatasetFactory, dpo_collate_fn, grpo_collate_fn
@@ -271,6 +272,16 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="Enable activation checkpointing for DecoderBlock modules.",
     )
+    parser.add_argument(
+        "--loss_backend",
+        type=str,
+        default="torch",
+        choices=["torch", "liger"],
+        help=(
+            "Language-model loss backend. Liger fuses the LM head and cross "
+            "entropy without materializing full-vocabulary logits."
+        ),
+    )
 
     parser.add_argument(
         "--ckpt_interval",
@@ -358,6 +369,16 @@ def parse_args() -> argparse.Namespace:
         default="none",
         choices=["none", "ddp", "fsdp", "fsdp2"],
         help="Parallel training strategy (none, ddp, fsdp, fsdp2).",
+    )
+    parser.add_argument(
+        "--fsdp_sharding_strategy",
+        type=str,
+        default="full_shard",
+        choices=["full_shard", "shard_grad_op"],
+        help=(
+            "FSDP sharding level: full_shard is ZeRO-3; shard_grad_op is "
+            "ZeRO-2 and keeps full parameters resident through backward."
+        ),
     )
     parser.add_argument(
         "--device_type", type=str, default="cuda", help="Device type to use."
@@ -475,10 +496,12 @@ def train(
     num_workers: int,
     pin_memory: bool,
     gradient_checkpointing: bool,
+    loss_backend: str,
     window_size: int,
     stride: int,
     nprocs: int,
     parallel_mode: str,
+    fsdp_sharding_strategy: str,
     device_type: str,
     backend: str,
     master_addr: str,
@@ -506,6 +529,8 @@ def train(
         raise ValueError(
             "--nprocs > 1 requires --parallel_mode to be 'ddp', 'fsdp', or 'fsdp2'"
         )
+    if loss_backend != "torch" and train_type != "seq":
+        raise ValueError("the Liger loss backend currently supports train_type=seq")
 
     # Load config
     config_path = os.path.join(param_path, "config.json")
@@ -521,6 +546,7 @@ def train(
         "clip_eps": kwargs.pop("grpo_clip_eps"),
         "kl_coef": kwargs.pop("grpo_kl_coef"),
         "group_size": kwargs.pop("group_size"),
+        "loss_backend": loss_backend,
     }
 
     rollout_interval = kwargs.pop("rollout_interval", 512)
@@ -536,6 +562,11 @@ def train(
             gradient_as_bucket_view=True,
             broadcast_buffers=False,
         )
+    elif parallel_mode == "fsdp":
+        executor_kwargs["sharding_strategy"] = {
+            "full_shard": ShardingStrategy.FULL_SHARD,
+            "shard_grad_op": ShardingStrategy.SHARD_GRAD_OP,
+        }[fsdp_sharding_strategy]
 
     model_fn = partial(create_model, config)
     dataset = DatasetFactory.load(

@@ -10,6 +10,8 @@ log_root=${ASTRAI_LOG_ROOT:-/mnt/nvme9/astrai/logs}
 stop_file=${ASTRAI_STOP_FILE:-/mnt/nvme9/astrai/STOP_PRETRAIN_12B}
 pid_file=${ASTRAI_TRAIN_PID_FILE:-$log_root/train-pretrain-12b.pid}
 log_file=${ASTRAI_TRAIN_LOG:-$log_root/train-pretrain-12b.log}
+fsdp_sharding=${ASTRAI_FSDP_SHARDING:-shard_grad_op}
+loss_backend=${ASTRAI_LOSS_BACKEND:-liger}
 
 if pgrep -f 'scripts/tools/train.py.*pretrain-2048' >/dev/null; then
     echo 'AstrAI pretraining is already running.' >&2
@@ -59,7 +61,9 @@ rm -f "$stop_file"
 cd "$repo"
 
 nohup setsid "$train_python" scripts/tools/train.py \
-    --nprocs=8 --parallel_mode=fsdp --train_type=seq \
+    --nprocs=8 --parallel_mode=fsdp \
+    --fsdp_sharding_strategy="$fsdp_sharding" \
+    --loss_backend="$loss_backend" --train_type=seq \
     --data_root_path="$data_root" --param_path="$param_path" "${resume_args[@]}" \
     --batch_per_device=1 --grad_accum_steps=32 --gradient_checkpointing \
     --window_size=2048 --n_epoch=1 --num_workers=4 \

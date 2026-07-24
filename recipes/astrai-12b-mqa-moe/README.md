@@ -58,6 +58,8 @@ Start with a tiny processed shard before using the complete corpus:
 python scripts/tools/train.py \
   --nprocs=8 \
   --parallel_mode=fsdp \
+  --fsdp_sharding_strategy=shard_grad_op \
+  --loss_backend=liger \
   --train_type=seq \
   --data_root_path=data-bin/smoke-2048 \
   --param_path=params/astrai-12b-mqa-moe \
@@ -75,6 +77,28 @@ python scripts/tools/train.py \
 ```
 
 This is a correctness recipe, not the final throughput configuration. Increase `batch_per_device` only after measuring peak memory, tokens/s, and router balance on the target node.
+
+For this 8xH200 recipe, `shard_grad_op` is the selected ZeRO-2 path. Routed
+expert weights are already rank-local under expert parallelism, while the
+roughly 1.9B non-routed parameters fit comfortably unsharded during compute.
+Unlike ZeRO-3 (`full_shard`), ZeRO-2 does not reshard those parameters after
+forward and therefore avoids the backward all-gather, including the extra
+pressure from activation checkpoint recomputation. Set
+`ASTRAI_FSDP_SHARDING=full_shard` in the nightly launcher for the lower-memory
+rollback path.
+
+The selected `liger` loss backend uses Liger's fused linear cross-entropy, so
+the 2048x100K full-vocabulary logits and their roughly 0.82GB FP32 cast are not
+materialized. Install `liger-kernel==0.8.1` in the training environment before
+the smoke run. Set `ASTRAI_LOSS_BACKEND=torch` to retain the original PyTorch
+LM-head plus FP32 cross-entropy path without changing checkpoint parameters.
+Validate its loss/gradient numerics and exact-shape throughput on H200 with:
+
+```bash
+python scripts/tools/benchmark_training_loss.py --backend torch-fp32 --check
+python scripts/tools/benchmark_training_loss.py --backend torch-native --check
+python scripts/tools/benchmark_training_loss.py --backend liger --check
+```
 
 ## DeepEP validation
 

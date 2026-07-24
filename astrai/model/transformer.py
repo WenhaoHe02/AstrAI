@@ -64,6 +64,11 @@ class AutoRegressiveLM(AutoModel):
         if self.config.tie_word_embeddings is True:
             self.lm_head.weight = self.embed_tokens.weight
 
+        # Loss modules have no parameters and are cached outside ModuleDict so
+        # lazily enabling an optional training kernel after FSDP wrapping does
+        # not alter the wrapped parameter/module topology.
+        self._fused_loss_cache = {}
+
         self.apply(self._init_weights)
 
     def _init_weights(self, module):
@@ -105,6 +110,9 @@ class AutoRegressiveLM(AutoModel):
         input_mask: Optional[Tensor] = None,
         paged_cache: Optional[CacheView] = None,
         position_ids: Optional[Tensor] = None,
+        target_ids: Optional[Tensor] = None,
+        loss_backend: str = "torch",
+        label_smoothing: float = 0.0,
     ) -> Dict[str, Tensor]:
         assert input_ids.ndim == 2
 
@@ -127,13 +135,39 @@ class AutoRegressiveLM(AutoModel):
                 router_outputs.append(layer_router_outputs)
 
         hidden_states = self.norm(x)
-        logits = self.lm_head(hidden_states)
+        output = {"hidden_states": hidden_states}
+        if loss_backend == "torch":
+            output["logits"] = self.lm_head(hidden_states)
+        elif loss_backend == "liger":
+            if target_ids is None:
+                raise ValueError("target_ids are required for the Liger loss backend")
+            try:
+                from liger_kernel.transformers import (
+                    LigerFusedLinearCrossEntropyLoss,
+                )
+            except ImportError as exc:
+                raise RuntimeError(
+                    "loss_backend='liger' requires the liger-kernel package"
+                ) from exc
 
-        output = {"logits": logits, "hidden_states": hidden_states}
-        if router_outputs:
-            aux_losses, z_losses, expert_loads, router_entropies = zip(
-                *router_outputs
+            cache_key = (label_smoothing,)
+            loss_fn = self._fused_loss_cache.get(cache_key)
+            if loss_fn is None:
+                loss_fn = LigerFusedLinearCrossEntropyLoss(
+                    label_smoothing=label_smoothing,
+                )
+                self._fused_loss_cache[cache_key] = loss_fn
+            output["language_model_loss"] = loss_fn(
+                self.lm_head.weight,
+                hidden_states.flatten(0, 1),
+                target_ids.flatten(),
             )
+        else:
+            raise ValueError(
+                f"loss_backend must be 'torch' or 'liger', got {loss_backend!r}"
+            )
+        if router_outputs:
+            aux_losses, z_losses, expert_loads, router_entropies = zip(*router_outputs)
             router_aux_loss = torch.stack(aux_losses).mean()
             router_z_loss = torch.stack(z_losses).mean()
             output.update(

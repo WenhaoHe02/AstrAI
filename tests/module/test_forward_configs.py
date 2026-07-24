@@ -1,5 +1,9 @@
+import sys
+import types
+
 import pytest
 import torch
+import torch.nn.functional as F
 
 from astrai.config.model_config import AutoRegressiveLMConfig
 from astrai.model.transformer import AutoRegressiveLM
@@ -199,3 +203,59 @@ def test_invalid_attention_backend_fails_during_model_construction():
 
     with pytest.raises(ValueError, match="attention_backend"):
         AutoRegressiveLM(config)
+
+
+def test_liger_loss_backend_avoids_materializing_logits(monkeypatch):
+    class FakeLigerFusedLinearCrossEntropyLoss:
+        def __init__(self, label_smoothing=0.0):
+            self.label_smoothing = label_smoothing
+
+        def __call__(self, weight, hidden_states, target_ids):
+            return F.cross_entropy(
+                F.linear(hidden_states, weight).float(),
+                target_ids,
+                label_smoothing=self.label_smoothing,
+            )
+
+    liger_package = types.ModuleType("liger_kernel")
+    liger_transformers = types.ModuleType("liger_kernel.transformers")
+    liger_transformers.LigerFusedLinearCrossEntropyLoss = (
+        FakeLigerFusedLinearCrossEntropyLoss
+    )
+    liger_package.transformers = liger_transformers
+    monkeypatch.setitem(sys.modules, "liger_kernel", liger_package)
+    monkeypatch.setitem(sys.modules, "liger_kernel.transformers", liger_transformers)
+
+    config = AutoRegressiveLMConfig(
+        **TINY_CONFIG,
+        attn_type="gqa",
+        ffn_type="mlp",
+    )
+    model = AutoRegressiveLM(config)
+    input_ids = torch.randint(0, config.vocab_size, (2, 8))
+    target_ids = torch.randint(0, config.vocab_size, (2, 8))
+
+    output = model(
+        input_ids,
+        target_ids=target_ids,
+        loss_backend="liger",
+    )
+    output["language_model_loss"].backward()
+
+    assert "logits" not in output
+    assert output["language_model_loss"].ndim == 0
+    assert torch.isfinite(output["language_model_loss"])
+    assert model.lm_head.weight.grad is not None
+
+
+def test_liger_loss_backend_requires_targets():
+    config = AutoRegressiveLMConfig(
+        **TINY_CONFIG,
+        attn_type="gqa",
+        ffn_type="mlp",
+    )
+    model = AutoRegressiveLM(config)
+    input_ids = torch.randint(0, config.vocab_size, (2, 8))
+
+    with pytest.raises(ValueError, match="target_ids"):
+        model(input_ids, loss_backend="liger")

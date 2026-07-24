@@ -1,12 +1,12 @@
 import logging
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import torch
 import torch.distributed as dist
 
 from astrai.config import TrainConfig
-from astrai.parallel.setup import get_current_device, spawn_parallel_fn
+from astrai.parallel.setup import get_current_device, get_rank, spawn_parallel_fn
 from astrai.trainer.train_callback import (
     CallbackFactory,
     TrainCallback,
@@ -14,6 +14,48 @@ from astrai.trainer.train_callback import (
 from astrai.trainer.train_context import TrainContext, TrainContextBuilder
 
 logger = logging.getLogger(__name__)
+
+
+class _StepMetricAccumulator:
+    """Batch scalar device metrics without synchronizing every microbatch."""
+
+    def __init__(self):
+        self._names: Optional[tuple[str, ...]] = None
+        self._vectors: List[torch.Tensor] = []
+
+    def add(self, loss: torch.Tensor, metrics: Dict[str, torch.Tensor]) -> None:
+        values = {"loss": loss.detach(), **metrics}
+        names = tuple(values)
+        if self._names is None:
+            self._names = names
+        elif names != self._names:
+            raise RuntimeError(
+                "training metric names changed within a gradient accumulation step"
+            )
+
+        scalars = []
+        for name, value in values.items():
+            if not isinstance(value, torch.Tensor) or value.numel() != 1:
+                raise TypeError(f"training metric {name!r} must be a scalar tensor")
+            scalars.append(value.detach())
+        self._vectors.append(torch.stack(scalars))
+
+    def materialize(self, context: TrainContext) -> None:
+        if not self._vectors or self._names is None:
+            return
+
+        # Only rank 0 owns metric/progress callbacks. One packed transfer
+        # replaces O(metrics * grad_accum_steps * world_size) scalar .item()
+        # synchronizations. Other ranks discard their detached metric vectors.
+        if get_rank() == 0:
+            averages = torch.stack(self._vectors).float().mean(dim=0)
+            host_values = averages.cpu().tolist()
+            for name, value in zip(self._names, host_values, strict=True):
+                if hasattr(context, name):
+                    setattr(context, name, value)
+
+        self._names = None
+        self._vectors.clear()
 
 
 class Trainer:
@@ -39,6 +81,9 @@ class Trainer:
                 cfg.ckpt_interval,
                 checkpoint_after_first_step=cfg.checkpoint_after_first_step,
             ),
+            # Clip before metric/progress callbacks so the current step's
+            # gradient norm is recorded instead of the previous step's value.
+            CallbackFactory.create("gradient_clipping", cfg.max_grad_norm),
             CallbackFactory.create(
                 "metric",
                 log_dir=cfg.log_dir,
@@ -47,7 +92,6 @@ class Trainer:
                 val_step=cfg.val_step,
             ),
             CallbackFactory.create("progress_bar", cfg.n_epoch),
-            CallbackFactory.create("gradient_clipping", cfg.max_grad_norm),
         ]
         return callbacks
 
@@ -85,6 +129,7 @@ class Trainer:
         try:
             context.model.train()
             stop_requested = False
+            step_metrics = _StepMetricAccumulator()
 
             for epoch in range(context.epoch, context.config.n_epoch):
                 context.epoch = epoch
@@ -94,10 +139,7 @@ class Trainer:
                     with executor.accumulate(context.model):
                         self._call_callbacks("on_batch_begin", context)
                         loss = context.strategy(batch)
-                        context.loss = loss.item()
-                        for name, value in context.strategy.last_metrics.items():
-                            if hasattr(context, name):
-                                setattr(context, name, value)
+                        step_metrics.add(loss, context.strategy.last_metrics)
                         stand_loss = loss / executor.grad_accum_steps
                         executor.backward(stand_loss)
                         context.consumed_samples += (
@@ -106,6 +148,7 @@ class Trainer:
                         self._call_callbacks("on_batch_end", context)
 
                         if executor.sync_gradients:
+                            step_metrics.materialize(context)
                             self._call_callbacks("on_optimizer_step", context)
                             context.optimizer.step()
                             context.strategy.on_optimizer_step()
