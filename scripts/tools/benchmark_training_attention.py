@@ -17,7 +17,7 @@ def parse_args():
     parser.add_argument("--batch", type=int, default=1)
     parser.add_argument("--seq-len", type=int, default=2048)
     parser.add_argument("--q-heads", type=int, default=24)
-    parser.add_argument("--kv-heads", type=int, default=1)
+    parser.add_argument("--kv-heads", type=int, default=4)
     parser.add_argument("--head-dim", type=int, default=128)
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=20)

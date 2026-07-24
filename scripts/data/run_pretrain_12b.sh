@@ -4,12 +4,12 @@ set -euo pipefail
 repo=${ASTRAI_REPO:-/home/zbuser02/AstrAI-12b}
 train_python=${ASTRAI_TRAIN_PYTHON:-/mnt/nvme9/astrai/envs/train/bin/python}
 data_root=${ASTRAI_DATA_ROOT:-/mnt/nvme6/astrai/tokenized/pretrain-2048}
-base_params=${ASTRAI_BASE_PARAMS:-$repo/params/astrai-12b-mqa-moe}
-ckpt_root=${ASTRAI_CKPT_ROOT:-/mnt/nvme8/astrai/checkpoints/pretrain-12b}
+base_params=${ASTRAI_BASE_PARAMS:-$repo/params/astrai-12b-gqa-moe}
+ckpt_root=${ASTRAI_CKPT_ROOT:-/mnt/nvme8/astrai/checkpoints/pretrain-12b-gqa}
 log_root=${ASTRAI_LOG_ROOT:-/mnt/nvme9/astrai/logs}
-stop_file=${ASTRAI_STOP_FILE:-/mnt/nvme9/astrai/STOP_PRETRAIN_12B}
-pid_file=${ASTRAI_TRAIN_PID_FILE:-$log_root/train-pretrain-12b.pid}
-log_file=${ASTRAI_TRAIN_LOG:-$log_root/train-pretrain-12b.log}
+stop_file=${ASTRAI_STOP_FILE:-/mnt/nvme9/astrai/STOP_PRETRAIN_12B_GQA}
+pid_file=${ASTRAI_TRAIN_PID_FILE:-$log_root/train-pretrain-12b-gqa.pid}
+log_file=${ASTRAI_TRAIN_LOG:-$log_root/train-pretrain-12b-gqa.log}
 fsdp_sharding=${ASTRAI_FSDP_SHARDING:-shard_grad_op}
 loss_backend=${ASTRAI_LOSS_BACKEND:-liger}
 swiglu_backend=${ASTRAI_SWIGLU_BACKEND:-liger}
@@ -89,7 +89,7 @@ nohup setsid "$train_python" scripts/tools/train.py \
     --warmup_ratio=0.01 --max_lr=2e-4 --weight_decay=0.1 \
     --max_grad_norm=1.0 --schedule_type=wsd --ckpt_interval=250 \
     --checkpoint_after_first_step --stop_file="$stop_file" \
-    --ckpt_dir="$ckpt_root" --log_dir="$log_root/train-pretrain-12b" \
+    --ckpt_dir="$ckpt_root" --log_dir="$log_root/train-pretrain-12b-gqa" \
     --metrics loss language_model_loss router_loss router_aux_loss \
     router_z_loss router_entropy expert_load_min expert_load_max \
     expert_load_cv step_time tokens_per_second peak_memory_gb lr grad_norm \

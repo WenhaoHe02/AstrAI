@@ -12,7 +12,7 @@
   "attn_type": "gqa",
   "attention_backend": "flash_sdpa",
   "num_attention_heads": 24,
-  "num_key_value_heads": 1,
+  "num_key_value_heads": 4,
   "use_qk_norm": false,
   "use_gated_attention": false,
   "ffn_type": "moe",

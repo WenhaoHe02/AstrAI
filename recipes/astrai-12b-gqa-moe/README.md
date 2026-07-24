@@ -1,8 +1,8 @@
-# AstrAI 12B MQA-MoE pretraining recipe
+# AstrAI 12B GQA-MoE pretraining recipe
 
-This recipe defines a 12.155B-total, 3.171B-active decoder model:
+This recipe defines a 12.230B-total, 3.246B-active decoder model:
 
-- 32 layers, hidden size 3072, 24 query heads, one KV head (MQA)
+- 32 layers, hidden size 3072, 24 query heads, four KV heads (6:1 GQA)
 - 16 routed experts, one shared expert, top-2 routing
 - 8-way expert parallelism (two routed experts per H200) with grouped GEMM
 - DeepEP V2 expand dispatch/combine for the EP communication path
@@ -14,15 +14,15 @@ The initial data mix should be sampled by token count, not by file count. Start 
 
 ## Prepare a fresh parameter directory
 
-Copy the existing tokenizer files into a new parameter directory, then replace its model config with this recipe's `config.json`. Do not copy the 1B model weights: the changed width, depth, MQA layout, and MoE experts are not checkpoint-compatible.
+Copy the existing tokenizer files into a new parameter directory, then replace its model config with this recipe's `config.json`. Do not copy the 1B model weights: the changed width, depth, GQA layout, and MoE experts are not checkpoint-compatible. MQA checkpoints from the earlier one-KV-head recipe are also incompatible with the four-KV-head K/V projection shapes and must not be resumed.
 
 ## Preprocess
 
 ```bash
 python scripts/tools/preprocess.py data/*.jsonl \
   -o data-bin/pretrain-2048 \
-  -c recipes/astrai-12b-mqa-moe/pretrain-2048.json \
-  --tokenizer_path params/astrai-12b-mqa-moe
+  -c recipes/astrai-12b-gqa-moe/pretrain-2048.json \
+  --tokenizer_path params/astrai-12b-gqa-moe
 ```
 
 The binary storage is memory-mapped by the dataset reader, so the tokenized corpus does not need to fit in RAM.
@@ -39,7 +39,7 @@ tokenizer, rather than balancing files, bytes, or document counts:
 ```bash
 python scripts/data/balance_pretrain.py \
   --zh data/dedup/zh --en data/dedup/en \
-  --tokenizer params/astrai-12b-mqa-moe/tokenizer.json \
+  --tokenizer params/astrai-12b-gqa-moe/tokenizer.json \
   --output data/pretrain-balanced.jsonl \
   --tokens-per-language auto --batch-size 512
 ```
@@ -62,7 +62,7 @@ python scripts/tools/train.py \
   --loss_backend=liger \
   --train_type=seq \
   --data_root_path=data-bin/smoke-2048 \
-  --param_path=params/astrai-12b-mqa-moe \
+  --param_path=params/astrai-12b-gqa-moe \
   --batch_per_device=1 \
   --grad_accum_steps=32 \
   --gradient_checkpointing \
@@ -168,7 +168,7 @@ or comparing against the conservative path.
 
 The checked-in recipe selects the mature Hopper-oriented path directly:
 
-- PyTorch fused Flash-SDPA for full-sequence causal MQA training;
+- PyTorch fused Flash-SDPA for full-sequence causal GQA training;
 - DeepEP V2 expert dispatch with 128-token expert alignment;
 - DeepEP's compute-overlap mode and shared-expert side-stream overlap;
 - Liger fused SwiGLU for both shared and routed experts;
@@ -227,7 +227,7 @@ grouped-GEMM activations across 32 layers can erase H200's memory headroom. Gate
 it with the `--no-cpu-sync` expert smoke/benchmark above and the logged peak
 memory before enabling it for a formal run.
 
-The 2048-token pretraining path is a full-sequence causal MQA workload, not a
+The 2048-token pretraining path is a full-sequence causal GQA workload, not a
 decode split-KV workload. The benchmark helper remains available for the first
 H200 validation window at the model's exact head shape:
 

@@ -2,11 +2,11 @@ import json
 from pathlib import Path
 
 
-def test_12b_mqa_moe_recipe_parameter_count():
+def test_12b_gqa_moe_recipe_parameter_count():
     recipe_path = (
         Path(__file__).parents[2]
         / "recipes"
-        / "astrai-12b-mqa-moe"
+        / "astrai-12b-gqa-moe"
         / "config.json"
     )
     config = json.loads(recipe_path.read_text(encoding="utf-8"))
@@ -29,6 +29,7 @@ def test_12b_mqa_moe_recipe_parameter_count():
     total = embedding + n_layers * (attention + 2 * dim + total_ffn) + dim
     active = embedding + n_layers * (attention + 2 * dim + active_ffn) + dim
 
-    assert config["num_key_value_heads"] == 1
-    assert total == 12_154_702_848
-    assert active == 3_170_503_680
+    assert config["num_attention_heads"] // config["num_key_value_heads"] == 6
+    assert config["num_key_value_heads"] == 4
+    assert total == 12_230_200_320
+    assert active == 3_246_001_152

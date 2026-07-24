@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-stop_file=${ASTRAI_STOP_FILE:-/mnt/nvme9/astrai/STOP_PRETRAIN_12B}
+stop_file=${ASTRAI_STOP_FILE:-/mnt/nvme9/astrai/STOP_PRETRAIN_12B_GQA}
 
 mkdir -p "$(dirname "$stop_file")"
 touch "$stop_file"

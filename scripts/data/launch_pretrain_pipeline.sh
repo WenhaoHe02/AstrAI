@@ -5,7 +5,7 @@ repo=${ASTRAI_REPO:-/home/zbuser02/AstrAI-12b}
 curation_python=${ASTRAI_CURATION_PYTHON:-/mnt/nvme2/astrai/envs/curation/bin/python}
 train_python=${ASTRAI_TRAIN_PYTHON:-/mnt/nvme9/astrai/envs/train/bin/python}
 log_root=${ASTRAI_LOG_ROOT:-/mnt/nvme9/astrai/logs}
-stop_file=${ASTRAI_STOP_FILE:-/mnt/nvme9/astrai/STOP_PRETRAIN_12B}
+stop_file=${ASTRAI_STOP_FILE:-/mnt/nvme9/astrai/STOP_PRETRAIN_12B_GQA}
 preprocess_workers=${ASTRAI_PREPROCESS_WORKERS:-32}
 preprocess_rayon_threads=${ASTRAI_PREPROCESS_RAYON_THREADS:-6}
 
@@ -53,7 +53,7 @@ launch "$log_root/balance-full.log" \
     /usr/bin/env RAYON_NUM_THREADS=12 TOKENIZERS_PARALLELISM=true \
     "$curation_python" scripts/data/balance_pretrain.py \
     --zh /mnt/nvme4/astrai/dedup/zh --en /mnt/nvme4/astrai/dedup/en \
-    --tokenizer params/astrai-12b-mqa-moe/tokenizer.json \
+    --tokenizer params/astrai-12b-gqa-moe/tokenizer.json \
     --output /mnt/nvme3/astrai/normalized/pretrain-balanced.jsonl \
     --tokens-per-language auto --batch-size 512 --index-workers 8 \
     --document-token-overhead 1
@@ -66,11 +66,11 @@ launch "$log_root/preprocess-full.log" \
     "$train_python" scripts/data/parallel_preprocess.py \
     --input /mnt/nvme3/astrai/normalized/pretrain-balanced.jsonl \
     --output /mnt/nvme6/astrai/tokenized/pretrain-2048 \
-    --config recipes/astrai-12b-mqa-moe/pretrain-2048.json \
-    --tokenizer-path params/astrai-12b-mqa-moe --workers "$preprocess_workers"
+    --config recipes/astrai-12b-gqa-moe/pretrain-2048.json \
+    --tokenizer-path params/astrai-12b-gqa-moe --workers "$preprocess_workers"
 preprocess_pid=$launched_pid
 
-launch "$log_root/train-pretrain-12b.log" \
+launch "$log_root/train-pretrain-12b-gqa.log" \
     "$curation_python" scripts/data/wait_and_run.py --pid "$preprocess_pid" \
     --require /mnt/nvme6/astrai/tokenized/pretrain-2048/_SUCCESS -- \
     /usr/bin/env PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True NCCL_DEBUG=WARN \
@@ -80,20 +80,20 @@ launch "$log_root/train-pretrain-12b.log" \
     --swiglu_backend=liger --residual_norm_backend=liger \
     --router_score_dtype=fp32 --train_type=seq \
     --data_root_path=/mnt/nvme6/astrai/tokenized/pretrain-2048 \
-    --param_path=params/astrai-12b-mqa-moe \
+    --param_path=params/astrai-12b-gqa-moe \
     --batch_per_device=4 --grad_accum_steps=8 \
     --window_size=2048 --n_epoch=1 --num_workers=4 \
     --warmup_ratio=0.01 --max_lr=2e-4 --weight_decay=0.1 \
     --max_grad_norm=1.0 --schedule_type=wsd --ckpt_interval=250 \
     --checkpoint_after_first_step --stop_file="$stop_file" \
-    --ckpt_dir=/mnt/nvme8/astrai/checkpoints/pretrain-12b \
-    --log_dir="$log_root/train-pretrain-12b" \
+    --ckpt_dir=/mnt/nvme8/astrai/checkpoints/pretrain-12b-gqa \
+    --log_dir="$log_root/train-pretrain-12b-gqa" \
     --metrics loss language_model_loss router_loss router_aux_loss \
     router_z_loss router_entropy expert_load_min expert_load_max \
     expert_load_cv step_time tokens_per_second peak_memory_gb lr grad_norm
 train_watcher_pid=$launched_pid
 
-pid_file="$log_root/pretrain-pipeline.pids"
+pid_file="$log_root/pretrain-gqa-pipeline.pids"
 printf '%s\n' \
     "zh_minhash=$zh_minhash_pid" \
     "en_quality=$en_quality_pid" \
