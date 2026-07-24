@@ -3,6 +3,7 @@ import types
 
 import pytest
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 from astrai.config.model_config import AutoRegressiveLMConfig
@@ -190,6 +191,28 @@ def test_moe_router_statistics_match_reference_formulas():
 
     assert torch.equal(expert_load, expected_load)
     assert torch.allclose(entropy, expected_entropy, atol=1e-6, rtol=1e-6)
+
+
+def test_single_shared_expert_returns_projection_without_extra_arithmetic():
+    config = AutoRegressiveLMConfig(
+        **TINY_CONFIG,
+        attn_type="gqa",
+        ffn_type="moe",
+        n_routed_experts=4,
+        n_shared_experts=1,
+        n_activated_experts=2,
+        topk_method="greedy",
+    )
+    moe = AutoRegressiveLM(config).layers[0].mlp
+    sentinel = torch.randn(16, config.hidden_size)
+
+    class SentinelExpert(nn.Module):
+        def forward(self, _):
+            return sentinel
+
+    moe.shared_experts[0] = SentinelExpert()
+
+    assert moe._shared_forward(torch.randn_like(sentinel)) is sentinel
 
 
 def test_mqa_uses_native_gqa_sdpa(monkeypatch):

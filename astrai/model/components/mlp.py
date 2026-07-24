@@ -296,17 +296,25 @@ class DeepSeekMoE(nn.Module):
             current_stream.wait_stream(shared_stream)
             shared_out.record_stream(current_stream)
         else:
-            shared_out = self._shared_forward(x_flat)
+            shared_out = (
+                self._shared_forward(x_flat) if self.n_shared_experts > 0 else None
+            )
             routed_out, aux_loss, z_loss, expert_load, router_entropy = (
                 self._routed_forward(x_flat)
             )
 
-        out = (shared_out + routed_out).view(bsz, seq_len, dim)
+        if self.n_shared_experts == 0:
+            out = routed_out.view(bsz, seq_len, dim)
+        else:
+            assert shared_out is not None
+            out = (shared_out + routed_out).view(bsz, seq_len, dim)
         return out, aux_loss, z_loss, expert_load, router_entropy
 
     def _shared_forward(self, x: Tensor) -> Tensor:
         if self.n_shared_experts == 0:
             return torch.zeros_like(x)
+        if self.n_shared_experts == 1:
+            return self.shared_experts[0](x)
         return sum(e(x) for e in self.shared_experts) / self.n_shared_experts
 
     def _routed_forward(self, x: Tensor):
