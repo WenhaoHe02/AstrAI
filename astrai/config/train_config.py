@@ -65,6 +65,12 @@ class TrainConfig(BaseConfig):
         default=False,
         metadata={"help": "Save a recovery checkpoint after optimizer step 1."},
     )
+    stop_file: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "Shared file whose presence requests a checkpointed graceful stop."
+        },
+    )
 
     # lora setting
     lora: Optional[LoRAConfig] = field(

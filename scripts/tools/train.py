@@ -285,6 +285,15 @@ def parse_args() -> argparse.Namespace:
         help="Save a recovery checkpoint after optimizer step 1.",
     )
     parser.add_argument(
+        "--stop_file",
+        type=str,
+        default=None,
+        help=(
+            "Shared file whose presence requests a graceful stop after the "
+            "current optimizer step and writes a final checkpoint."
+        ),
+    )
+    parser.add_argument(
         "--ckpt_dir",
         type=str,
         default="checkpoint",
@@ -455,6 +464,7 @@ def train(
     warmup_ratio: float,
     ckpt_interval: int,
     checkpoint_after_first_step: bool,
+    stop_file: str,
     ckpt_dir: str,
     val_split: float,
     val_step: int,
@@ -599,6 +609,7 @@ def train(
         start_samples=start_samples,
         ckpt_interval=ckpt_interval,
         checkpoint_after_first_step=checkpoint_after_first_step,
+        stop_file=stop_file,
         grad_accum_steps=grad_accum_steps,
         max_grad_norm=max_grad_norm,
         random_seed=random_seed,

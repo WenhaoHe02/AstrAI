@@ -52,6 +52,17 @@ def test_checkpoint_after_first_step_is_one_shot():
     callback._save_checkpoint.assert_called_once_with(context)
 
 
+def test_stop_file_requests_graceful_stop(tmp_path):
+    stop_file = tmp_path / "STOP"
+    context = SimpleNamespace(
+        config=SimpleNamespace(stop_file=str(stop_file)),
+    )
+
+    assert Trainer._stop_requested(context) is False
+    stop_file.touch()
+    assert Trainer._stop_requested(context) is True
+
+
 def test_gradient_checkpointing_empty_modules_noop(test_model):
     """modules=None should leave forwards untouched."""
     model = test_model["model"]

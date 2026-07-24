@@ -5,10 +5,12 @@ repo=${ASTRAI_REPO:-/home/zbuser02/AstrAI-12b}
 curation_python=${ASTRAI_CURATION_PYTHON:-/mnt/nvme2/astrai/envs/curation/bin/python}
 train_python=${ASTRAI_TRAIN_PYTHON:-/mnt/nvme9/astrai/envs/train/bin/python}
 log_root=${ASTRAI_LOG_ROOT:-/mnt/nvme9/astrai/logs}
+stop_file=${ASTRAI_STOP_FILE:-/mnt/nvme9/astrai/STOP_PRETRAIN_12B}
 preprocess_workers=${ASTRAI_PREPROCESS_WORKERS:-32}
 preprocess_rayon_threads=${ASTRAI_PREPROCESS_RAYON_THREADS:-6}
 
 cd "$repo"
+rm -f "$stop_file"
 
 launch() {
     local logfile=$1
@@ -79,8 +81,8 @@ launch "$log_root/train-pretrain-12b.log" \
     --batch_per_device=1 --grad_accum_steps=32 --gradient_checkpointing \
     --window_size=2048 --n_epoch=1 --num_workers=4 \
     --warmup_ratio=0.01 --max_lr=2e-4 --weight_decay=0.1 \
-    --max_grad_norm=1.0 --schedule_type=wsd --ckpt_interval=5000 \
-    --checkpoint_after_first_step \
+    --max_grad_norm=1.0 --schedule_type=wsd --ckpt_interval=250 \
+    --checkpoint_after_first_step --stop_file="$stop_file" \
     --ckpt_dir=/mnt/nvme8/astrai/checkpoints/pretrain-12b \
     --log_dir="$log_root/train-pretrain-12b" \
     --metrics loss language_model_loss router_loss router_aux_loss \

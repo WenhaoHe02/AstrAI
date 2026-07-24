@@ -1,8 +1,12 @@
 import logging
+from pathlib import Path
 from typing import List, Optional
 
+import torch
+import torch.distributed as dist
+
 from astrai.config import TrainConfig
-from astrai.parallel.setup import spawn_parallel_fn
+from astrai.parallel.setup import get_current_device, spawn_parallel_fn
 from astrai.trainer.train_callback import (
     CallbackFactory,
     TrainCallback,
@@ -53,6 +57,22 @@ class Trainer:
             if method:
                 method(context)
 
+    @staticmethod
+    def _stop_requested(context: TrainContext) -> bool:
+        stop_file = context.config.stop_file
+        requested = bool(stop_file and Path(stop_file).exists())
+
+        # A shared filesystem can become visible to ranks at slightly different
+        # times. Make the decision collective so every rank enters checkpoint
+        # collectives and exits the loop together.
+        if dist.is_available() and dist.is_initialized():
+            flag = torch.tensor(
+                int(requested), device=get_current_device(), dtype=torch.int32
+            )
+            dist.all_reduce(flag, op=dist.ReduceOp.MAX)
+            requested = bool(flag.item())
+        return requested
+
     def _trainer_loop(self, param_path: Optional[str] = None, resume: bool = False):
         context = (
             TrainContextBuilder(self.train_config)
@@ -64,6 +84,7 @@ class Trainer:
 
         try:
             context.model.train()
+            stop_requested = False
 
             for epoch in range(context.epoch, context.config.n_epoch):
                 context.epoch = epoch
@@ -93,6 +114,18 @@ class Trainer:
                             if context.scheduler:
                                 context.scheduler.step()
                             self._call_callbacks("on_optimizer_step_end", context)
+
+                            if self._stop_requested(context):
+                                stop_requested = True
+                                break
+
+                if stop_requested:
+                    logger.info(
+                        "Graceful stop requested at optimizer step %d; "
+                        "saving final checkpoint.",
+                        context.optimizer_step,
+                    )
+                    break
 
                 self._call_callbacks("on_epoch_end", context)
 
