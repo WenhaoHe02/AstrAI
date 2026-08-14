@@ -18,9 +18,9 @@ from math import prod
 from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
+import requests
 import torch
 import tqdm
-from datasets import load_dataset
 
 from astrai.inference import InferenceEngine
 from astrai.model import AutoModel
@@ -31,6 +31,7 @@ from astrai.tokenize import AutoTokenizer
 # ---------------------------------------------------------------------------
 
 HUMANEVAL_HF_DATASET = "openai/openai_humaneval"
+HF_ROWS_URL = "https://datasets-server.huggingface.co/rows"
 
 STOP_SEQUENCES = [
     "\nclass ",
@@ -45,6 +46,7 @@ STOP_SEQUENCES = [
 @dataclass
 class EvalConfig:
     param_path: str = "./params"
+    tokenizer_path: Optional[str] = None
     data_path: str = "./humaneval/HumanEval.jsonl"
     output: Optional[str] = None
 
@@ -68,11 +70,30 @@ def download(path: str):
         return
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     print(f"Downloading HumanEval from HuggingFace ({HUMANEVAL_HF_DATASET}) ...")
-    ds = load_dataset(HUMANEVAL_HF_DATASET, split="test")
+    rows = []
+    offset = 0
+    while True:
+        response = requests.get(
+            HF_ROWS_URL,
+            params={
+                "dataset": HUMANEVAL_HF_DATASET,
+                "config": "openai_humaneval",
+                "split": "test",
+                "offset": offset,
+                "length": 100,
+            },
+            timeout=60,
+        )
+        response.raise_for_status()
+        batch = response.json().get("rows") or []
+        if not batch:
+            break
+        rows.extend((item.get("row") or {}) for item in batch)
+        offset += len(batch)
     with open(path, "w", encoding="utf-8") as f:
-        for item in ds:
+        for item in rows:
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
-    print(f"  saved {len(ds)} problems to {path}")
+    print(f"  saved {len(rows)} problems to {path}")
 
 
 def load_jsonl(path: str) -> List[dict]:
@@ -90,9 +111,19 @@ def save_json(path: str, data):
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
-def create_engine(param_path: str, batch_size: int) -> InferenceEngine:
-    model = AutoModel.from_pretrained(param_path)
-    tokenizer = AutoTokenizer.from_pretrained(param_path)
+def create_engine(
+    param_path: str, tokenizer_path: Optional[str], batch_size: int
+) -> InferenceEngine:
+    model = AutoModel.from_pretrained(
+        param_path,
+        config_overrides={
+            "expert_parallel_size": 1,
+            "expert_dispatch_backend": "torch",
+            "deepep_overlap_with_compute": False,
+            "moe_shared_expert_overlap": False,
+        },
+    )
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path or param_path)
     model.to(device="cuda", dtype=torch.bfloat16)
     return InferenceEngine(
         model=model,
@@ -233,7 +264,11 @@ def test_one(item: dict, cfg: EvalConfig, pool=None) -> Tuple[str, int, int]:
     completions = item["completions"]
     codes = [
         (
-            item["prompt"] + c + "\n" + item["test"],
+            item["prompt"]
+            + c
+            + "\n"
+            + item["test"]
+            + f"\ncheck({item['entry_point']})\n",
             item["entry_point"],
             cfg.test_timeout,
         )
@@ -318,7 +353,7 @@ def run_pipeline(cfg: EvalConfig) -> Dict:
         if cfg.problem_indices:
             problems = [problems[i] for i in cfg.problem_indices if i < len(problems)]
 
-        engine = create_engine(cfg.param_path, cfg.batch_size)
+        engine = create_engine(cfg.param_path, cfg.tokenizer_path, cfg.batch_size)
 
         try:
             generated = generate_all(engine, problems, cfg)
@@ -341,6 +376,7 @@ def run_pipeline(cfg: EvalConfig) -> Dict:
 def parse_args(argv: Optional[List[str]] = None) -> EvalConfig:
     p = argparse.ArgumentParser(description="HumanEval benchmark")
     p.add_argument("--param_path", type=str, default="./params")
+    p.add_argument("--tokenizer_path", type=str, default=None)
     p.add_argument("--data_path", type=str, default="./humaneval/HumanEval.jsonl")
     p.add_argument("--output", type=str, default=None)
     p.add_argument(
@@ -365,6 +401,7 @@ def parse_args(argv: Optional[List[str]] = None) -> EvalConfig:
 
     return EvalConfig(
         param_path=args.param_path,
+        tokenizer_path=args.tokenizer_path,
         data_path=args.data_path,
         output=args.output,
         test_only=args.test_only,

@@ -43,6 +43,7 @@ class AutoRegressiveLMConfig(BaseModelConfig):
 
     attn_type: str = "gqa"
     attention_backend: str = "auto"
+    fused_qkv: bool = False
     num_attention_heads: Optional[int] = None
     num_key_value_heads: Optional[int] = None
     use_qk_norm: Optional[bool] = None
@@ -53,6 +54,7 @@ class AutoRegressiveLMConfig(BaseModelConfig):
     qk_rope_head_dim: Optional[int] = None
 
     ffn_type: str = "mlp"
+    fused_mlp_gate_up: bool = False
     n_routed_experts: Optional[int] = None
     n_shared_experts: Optional[int] = None
     n_activated_experts: Optional[int] = None

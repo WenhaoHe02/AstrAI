@@ -80,6 +80,7 @@ class Trainer:
                 "checkpoint",
                 cfg.ckpt_dir,
                 cfg.ckpt_interval,
+                keep_last=cfg.ckpt_keep_last,
                 checkpoint_after_first_step=cfg.checkpoint_after_first_step,
             ),
             # Clip before metric/progress callbacks so the current step's
@@ -127,6 +128,7 @@ class Trainer:
         executor = context.executor
         self._call_callbacks("on_train_begin", context)
 
+        training_failed = False
         try:
             context.model.train()
             stop_requested = False
@@ -156,6 +158,7 @@ class Trainer:
                         self._call_callbacks("on_batch_end", context)
 
                         if executor.sync_gradients:
+                            executor.synchronize_gradients(context.model)
                             now = time.perf_counter()
                             context.step_time = now - interval_started_at
                             if interval_tokens > 0:
@@ -197,11 +200,17 @@ class Trainer:
                 self._call_callbacks("on_epoch_end", context)
 
         except Exception as e:
+            training_failed = True
             logger.error("Training failed: %s", str(e), exc_info=True)
             self._call_callbacks("on_error", context)
             raise
         finally:
-            self._call_callbacks("on_train_end", context)
+            # on_train_end may save a final checkpoint and mutate wrapped
+            # modules.  Neither operation is safe after a failed FSDP forward
+            # or backward, so only run normal shutdown callbacks after a clean
+            # loop exit (including a graceful stop-file exit).
+            if not training_failed:
+                self._call_callbacks("on_train_end", context)
 
     def train(self, param_path: Optional[str] = None, resume: bool = False):
         cfg = self.train_config

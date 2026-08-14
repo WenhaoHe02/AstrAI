@@ -11,6 +11,7 @@ from astrai.trainer.train_callback import (
     CheckpointCallback,
     GradientCheckpointingCallback,
     TrainCallback,
+    prune_checkpoint_dirs,
 )
 from astrai.trainer.trainer import Trainer
 
@@ -50,6 +51,54 @@ def test_checkpoint_after_first_step_is_one_shot():
     callback.on_optimizer_step_end(context)
 
     callback._save_checkpoint.assert_called_once_with(context)
+
+
+def test_checkpoint_after_first_step_is_relative_to_resume_step():
+    callback = CheckpointCallback(
+        "unused", interval=5000, checkpoint_after_first_step=True
+    )
+    context = SimpleNamespace(optimizer_step=48081)
+    callback.on_train_begin(context)
+    callback._save_checkpoint = Mock()
+
+    context.optimizer_step = 48082
+    callback.on_optimizer_step_end(context)
+    context.optimizer_step = 48083
+    callback.on_optimizer_step_end(context)
+
+    callback._save_checkpoint.assert_called_once_with(context)
+
+
+def test_checkpoint_on_error_does_not_save_partial_state():
+    callback = CheckpointCallback("unused", interval=5000)
+    callback._save_checkpoint = Mock()
+
+    callback.on_error(SimpleNamespace(optimizer_step=7))
+
+    callback._save_checkpoint.assert_not_called()
+
+
+def test_prune_checkpoint_dirs_keeps_latest_complete(tmp_path):
+    for step in (1, 251, 501, 751, 1001):
+        checkpoint = tmp_path / f"epoch_0_step_{step}"
+        checkpoint.mkdir()
+        for name in ("model.safetensors", "config.json", "meta.json"):
+            (checkpoint / name).touch()
+        for rank in range(2):
+            (checkpoint / f"optimizer.rank{rank}.pt").touch()
+    incomplete = tmp_path / "epoch_0_step_1251"
+    incomplete.mkdir()
+    (incomplete / "model.safetensors").touch()
+
+    removed = prune_checkpoint_dirs(tmp_path, keep_last=3, expected_optimizer_ranks=2)
+
+    assert [path.name for path in removed] == ["epoch_0_step_1", "epoch_0_step_251"]
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        "epoch_0_step_1001",
+        "epoch_0_step_1251",
+        "epoch_0_step_501",
+        "epoch_0_step_751",
+    ]
 
 
 def test_stop_file_requests_graceful_stop(tmp_path):

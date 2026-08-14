@@ -1,6 +1,8 @@
 import json
 import logging
 import os
+import re
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -20,6 +22,8 @@ from astrai.trainer.metric_util import (
     ctx_get_expert_load_cv,
     ctx_get_expert_load_max,
     ctx_get_expert_load_min,
+    ctx_get_effective_epochs,
+    ctx_get_global_batch_tokens,
     ctx_get_grad_norm,
     ctx_get_language_model_loss,
     ctx_get_loss,
@@ -30,12 +34,50 @@ from astrai.trainer.metric_util import (
     ctx_get_router_loss,
     ctx_get_router_z_loss,
     ctx_get_step_time,
+    ctx_get_seen_tokens,
     ctx_get_tokens_per_second,
     ctx_get_val_loss,
 )
 from astrai.trainer.train_context import TrainContext
 
 logger = logging.getLogger(__name__)
+
+_CHECKPOINT_DIR_RE = re.compile(r"epoch_(\d+)_step_(\d+)$")
+
+
+def prune_checkpoint_dirs(
+    save_dir: str | Path,
+    keep_last: int,
+    expected_optimizer_ranks: int = 0,
+) -> list[Path]:
+    """Delete old complete checkpoints and return the removed paths."""
+    if keep_last < 1:
+        raise ValueError("keep_last must be positive")
+    root = Path(save_dir)
+    if not root.is_dir():
+        return []
+
+    complete = []
+    for path in root.iterdir():
+        match = _CHECKPOINT_DIR_RE.fullmatch(path.name)
+        if not match or not path.is_dir():
+            continue
+        required = ["model.safetensors", "config.json", "meta.json"]
+        if not all((path / name).is_file() for name in required):
+            continue
+        if expected_optimizer_ranks and not all(
+            (path / f"optimizer.rank{rank}.pt").is_file()
+            for rank in range(expected_optimizer_ranks)
+        ):
+            continue
+        complete.append(((int(match.group(1)), int(match.group(2))), path))
+
+    complete.sort(key=lambda item: item[0])
+    removed = []
+    for _, path in complete[:-keep_last]:
+        shutil.rmtree(path)
+        removed.append(path)
+    return removed
 
 
 @runtime_checkable
@@ -149,16 +191,22 @@ class CheckpointCallback(TrainCallback):
         weight_only: bool = False,
         save_extra_fn: Optional[Callable[["TrainContext"], dict]] = None,
         checkpoint_after_first_step: bool = False,
+        keep_last: Optional[int] = None,
     ):
         self.save_dir = save_dir
         self.interval = interval
         self.weight_only = weight_only
         self.save_extra_fn = save_extra_fn or CheckpointCallback.save_extra
         self.checkpoint_after_first_step = checkpoint_after_first_step
+        if keep_last is not None and keep_last < 1:
+            raise ValueError("keep_last must be positive or None")
+        self.keep_last = keep_last
         self.last_ckpt_step = None
+        self.first_run_step = None
 
     def on_train_begin(self, context: TrainContext):
         self.last_ckpt_step = context.optimizer_step
+        self.first_run_step = context.optimizer_step + 1
 
     def _save_checkpoint(self, context: TrainContext):
         self.last_ckpt_step = context.optimizer_step
@@ -168,11 +216,16 @@ class CheckpointCallback(TrainCallback):
                 self.save_dir,
                 f"epoch_{context.epoch}_step_{context.optimizer_step}",
             )
-            if context.executor.use_distributed and context.optimizer is not None:
+            optimizer_rank = context.executor.optimizer_checkpoint_rank
+            if (
+                context.executor.use_distributed
+                and context.optimizer is not None
+                and optimizer_rank is not None
+            ):
                 Path(save_path).mkdir(parents=True, exist_ok=True)
                 save_torch(
                     context.optimizer.state_dict(),
-                    Path(save_path) / f"optimizer.rank{get_rank()}.pt",
+                    Path(save_path) / f"optimizer.rank{optimizer_rank}.pt",
                 )
             if state_dict is not None:
                 extra = self.save_extra_fn(context)
@@ -189,9 +242,35 @@ class CheckpointCallback(TrainCallback):
                 )
                 context.checkpoint.save(save_path)
 
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
+        if get_rank() == 0:
+            Path(save_path, "_SUCCESS").touch()
+            if self.keep_last is not None:
+                expected_ranks = (
+                    context.executor.optimizer_checkpoint_world_size
+                    if context.executor.use_distributed
+                    and context.optimizer is not None
+                    else 0
+                )
+                removed = prune_checkpoint_dirs(
+                    self.save_dir,
+                    self.keep_last,
+                    expected_optimizer_ranks=expected_ranks,
+                )
+                if removed:
+                    logger.info(
+                        "Pruned %d old checkpoints; keeping newest %d",
+                        len(removed),
+                        self.keep_last,
+                    )
+        if dist.is_available() and dist.is_initialized():
+            dist.barrier()
+
     def on_optimizer_step_end(self, context: TrainContext):
         if (
-            self.checkpoint_after_first_step and context.optimizer_step == 1
+            self.checkpoint_after_first_step
+            and context.optimizer_step == self.first_run_step
         ) or context.optimizer_step - self.last_ckpt_step >= self.interval:
             self._save_checkpoint(context)
 
@@ -200,7 +279,16 @@ class CheckpointCallback(TrainCallback):
             self._save_checkpoint(context)
 
     def on_error(self, context: TrainContext):
-        self._save_checkpoint(context)
+        # An exception can leave FSDP in FORWARD/BACKWARD state or leave ranks
+        # on different collectives.  Entering checkpoint collectives here can
+        # mask the original error, deadlock, or write a checkpoint containing a
+        # partially-updated accumulation step.  Periodic and graceful-stop
+        # checkpoints are saved only at optimizer-step boundaries and are the
+        # safe recovery points.
+        logger.warning(
+            "Skipping emergency checkpoint after training error; resume from "
+            "the latest complete optimizer-step checkpoint"
+        )
 
     @staticmethod
     def save_extra(context: TrainContext) -> dict:
@@ -300,6 +388,9 @@ class MetricCallback(TrainCallback):
             "step_time": ctx_get_step_time,
             "tokens_per_second": ctx_get_tokens_per_second,
             "peak_memory_gb": ctx_get_peak_memory_gb,
+            "global_batch_tokens": ctx_get_global_batch_tokens,
+            "seen_tokens": ctx_get_seen_tokens,
+            "effective_epochs": ctx_get_effective_epochs,
         }
 
     def _metrics(self, context: TrainContext, names):

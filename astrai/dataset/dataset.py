@@ -409,10 +409,23 @@ class SEQDataset(BaseDataset):
         begin, end = self.store.sample_window(index)
         x = self.store.fetch(begin, end, "sequence")
         y = self.store.fetch(begin + 1, end + 1, "sequence")
-        return {
+        item = {
             "input_ids": x.to(dtype=torch.long),
             "target_ids": y.to(dtype=torch.long),
         }
+        # A document-aware pretraining cache carries position ids that reset
+        # at every packed-document boundary.  Keep legacy sequence-only
+        # caches working, but expose the explicit boundaries when present.
+        if "position_ids" in self.store.keys:
+            position_ids = self.store.fetch(begin, end, "position_ids")
+            target_position_ids = self.store.fetch(
+                begin + 1, end + 1, "position_ids"
+            )
+            item["position_ids"] = position_ids.to(dtype=torch.long)
+            # Do not train the artificial transition from the previous
+            # document's EOS to the first token of the next document.
+            item["loss_mask"] = target_position_ids.ne(0)
+        return item
 
 
 @DatasetFactory.register("sft")

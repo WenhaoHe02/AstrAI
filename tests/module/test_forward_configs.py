@@ -304,6 +304,22 @@ def test_grouped_expert_rejects_invalid_row_scale_shape():
         experts(torch.randn(7, 8), torch.tensor([3, 4]), row_scale=torch.rand(6))
 
 
+def test_per_expert_library_linear_preserves_empty_segments():
+    x = torch.randn(5, 8)
+    weight = torch.randn(3, 4, 8)
+
+    actual = GroupedExperts._linear_per_expert(x, weight, [2, 0, 3])
+    expected = torch.cat(
+        (
+            F.linear(x[:2], weight[0]),
+            F.linear(x[2:2], weight[1]),
+            F.linear(x[2:], weight[2]),
+        )
+    )
+
+    assert torch.equal(actual, expected)
+
+
 def test_mqa_uses_native_gqa_sdpa(monkeypatch):
     import astrai.model.components.attention as attention_module
 
@@ -334,6 +350,48 @@ def test_flash_sdpa_backend_keeps_cpu_reference_path():
 
     output = model(input_ids)
 
+    assert output["logits"].shape == (2, 8, config.vocab_size)
+    assert torch.isfinite(output["logits"]).all()
+
+
+def test_transformer_engine_backend_is_parameter_compatible_on_cpu(monkeypatch):
+    class FakeDotProductAttention(nn.Module):
+        def __init__(self, **kwargs):
+            super().__init__()
+            self.kwargs = kwargs
+
+    te_root = types.ModuleType("transformer_engine")
+    te_pytorch = types.ModuleType("transformer_engine.pytorch")
+    te_pytorch.DotProductAttention = FakeDotProductAttention
+    te_root.pytorch = te_pytorch
+    monkeypatch.setitem(sys.modules, "transformer_engine", te_root)
+    monkeypatch.setitem(sys.modules, "transformer_engine.pytorch", te_pytorch)
+
+    baseline = AutoRegressiveLM(
+        AutoRegressiveLMConfig(
+            **TINY_CONFIG,
+            attn_type="gqa",
+            attention_backend="auto",
+            ffn_type="mlp",
+        )
+    )
+    config = AutoRegressiveLMConfig(
+        **TINY_CONFIG,
+        attn_type="gqa",
+        attention_backend="transformer_engine",
+        ffn_type="mlp",
+    )
+    model = AutoRegressiveLM(config)
+
+    assert set(model.state_dict()) == set(baseline.state_dict())
+    for layer in model.layers:
+        core = layer.attention.core_attention
+        assert core.kwargs["num_attention_heads"] == config.num_attention_heads
+        assert core.kwargs["num_gqa_groups"] == config.num_key_value_heads
+        assert core.kwargs["qkv_format"] == "bshd"
+
+    input_ids = torch.randint(0, config.vocab_size, (2, 8))
+    output = model(input_ids)
     assert output["logits"].shape == (2, 8, config.vocab_size)
     assert torch.isfinite(output["logits"]).all()
 

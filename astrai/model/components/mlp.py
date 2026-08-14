@@ -36,6 +36,7 @@ class MLP(nn.Module):
         dim_ffn: int,
         down_init_std: float = 0.02,
         swiglu_backend: str = "torch",
+        fused_mlp_gate_up: bool = False,
     ):
         super().__init__()
         if swiglu_backend not in ("torch", "liger"):
@@ -43,17 +44,60 @@ class MLP(nn.Module):
                 f"swiglu_backend must be 'torch' or 'liger', got {swiglu_backend!r}"
             )
         self.swiglu_backend = swiglu_backend
-        self.up = Linear(dim, dim_ffn)
-        self.gate = Linear(dim, dim_ffn)
+        self.dim_ffn = dim_ffn
+        self.fused_mlp_gate_up = fused_mlp_gate_up
+        if fused_mlp_gate_up:
+            # Preserve legacy flat order: up weights first, then gate weights.
+            self.up_gate = Linear(dim, 2 * dim_ffn)
+        else:
+            self.up = Linear(dim, dim_ffn)
+            self.gate = Linear(dim, dim_ffn)
         self.down = Linear(dim_ffn, dim, init_std=down_init_std)
 
     def forward(self, x: Tensor) -> Tensor:
-        gated = apply_swiglu(self.gate(x), self.up(x), self.swiglu_backend)
+        if self.fused_mlp_gate_up:
+            up, gate = self.up_gate(x).split(self.dim_ffn, dim=-1)
+        else:
+            up, gate = self.up(x), self.gate(x)
+        gated = apply_swiglu(gate, up, self.swiglu_backend)
         out = self.down(gated)
         return out
 
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs,
+    ):
+        fused_key = prefix + "up_gate.weight"
+        up_key, gate_key = prefix + "up.weight", prefix + "gate.weight"
+        if self.fused_mlp_gate_up and fused_key not in state_dict:
+            if up_key in state_dict and gate_key in state_dict:
+                state_dict[fused_key] = torch.cat(
+                    [state_dict.pop(up_key), state_dict.pop(gate_key)], dim=0
+                )
+        elif not self.fused_mlp_gate_up and fused_key in state_dict:
+            up, gate = state_dict.pop(fused_key).split(self.dim_ffn, dim=0)
+            state_dict[up_key], state_dict[gate_key] = up, gate
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
+
 
 _EP_GROUP_CACHE: dict[tuple[int, int], tuple[object, int]] = {}
+_EXPERT_DP_GROUP_CACHE: dict[
+    tuple[int, int], tuple[object | None, int, int]
+] = {}
 _SHARED_EXPERT_STREAM_CACHE: dict[int, torch.cuda.Stream] = {}
 
 
@@ -100,8 +144,55 @@ def _expert_parallel_group(size: int):
     return selected
 
 
+def _expert_data_parallel_group(size: int):
+    """Return the replica group for this rank's expert shard.
+
+    With ``world_size > expert_parallel_size`` the world is laid out as
+    contiguous EP replicas.  Ranks at the same offset in each replica own the
+    same expert slice and therefore form an expert data-parallel group.  Every
+    rank creates every group in the same order, as required by ``new_group``.
+    """
+    if size == 1:
+        return None, 0, 1
+    if not dist.is_available() or not dist.is_initialized():
+        raise RuntimeError(
+            "expert_parallel_size > 1 requires an initialized process group"
+        )
+    world_size = dist.get_world_size()
+    if world_size % size != 0:
+        raise ValueError(
+            f"world_size ({world_size}) must be divisible by "
+            f"expert_parallel_size ({size})"
+        )
+
+    key = (world_size, size)
+    cached = _EXPERT_DP_GROUP_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    replicas = world_size // size
+    if replicas == 1:
+        selected = (None, 0, 1)
+    else:
+        global_rank = dist.get_rank()
+        selected = None
+        for expert_rank in range(size):
+            ranks = [expert_rank + replica * size for replica in range(replicas)]
+            group = dist.new_group(ranks=ranks)
+            if global_rank in ranks:
+                selected = (group, ranks.index(global_rank), replicas)
+        assert selected is not None
+    _EXPERT_DP_GROUP_CACHE[key] = selected
+    return selected
+
+
 class GroupedExperts(nn.Module):
     """Jagged grouped-GEMM experts, optionally sharded by expert rank."""
+
+    # On H200, separate NVIDIA library GEMMs beat CUTLASS grouped GEMM for the
+    # two-local-expert inference shapes below this size.  Training keeps the
+    # grouped path because its backward is materially faster.
+    _INDIVIDUAL_LINEAR_MAX_TOKENS = 1024
 
     def __init__(
         self,
@@ -111,6 +202,7 @@ class GroupedExperts(nn.Module):
         down_init_std: float,
         expert_parallel_size: int = 1,
         swiglu_backend: str = "torch",
+        fused_mlp_gate_up: bool = False,
     ):
         super().__init__()
         if n_experts % expert_parallel_size != 0:
@@ -125,6 +217,11 @@ class GroupedExperts(nn.Module):
         self.process_group, self.expert_parallel_rank = _expert_parallel_group(
             expert_parallel_size
         )
+        (
+            self.expert_data_parallel_group,
+            self.expert_data_parallel_rank,
+            self.expert_data_parallel_size,
+        ) = _expert_data_parallel_group(expert_parallel_size)
         self.n_local_experts = n_experts // expert_parallel_size
         self.expert_start = self.expert_parallel_rank * self.n_local_experts
         self.expert_end = self.expert_start + self.n_local_experts
@@ -134,9 +231,19 @@ class GroupedExperts(nn.Module):
                 f"swiglu_backend must be 'torch' or 'liger', got {swiglu_backend!r}"
             )
         self.swiglu_backend = swiglu_backend
+        self.fused_mlp_gate_up = fused_mlp_gate_up
 
-        self.up_weight = nn.Parameter(torch.empty(self.n_local_experts, dim_ffn, dim))
-        self.gate_weight = nn.Parameter(torch.empty(self.n_local_experts, dim_ffn, dim))
+        if fused_mlp_gate_up:
+            self.up_gate_weight = nn.Parameter(
+                torch.empty(self.n_local_experts, 2 * dim_ffn, dim)
+            )
+        else:
+            self.up_weight = nn.Parameter(
+                torch.empty(self.n_local_experts, dim_ffn, dim)
+            )
+            self.gate_weight = nn.Parameter(
+                torch.empty(self.n_local_experts, dim_ffn, dim)
+            )
         self.down_weight = nn.Parameter(torch.empty(self.n_local_experts, dim, dim_ffn))
 
         # FSDP discovers this marker and leaves rank-local expert weights out
@@ -145,8 +252,11 @@ class GroupedExperts(nn.Module):
         self._expert_parallel_local = expert_parallel_size > 1
 
     def reset_parameters(self):
-        nn.init.normal_(self.up_weight, mean=0.0, std=0.02)
-        nn.init.normal_(self.gate_weight, mean=0.0, std=0.02)
+        if self.fused_mlp_gate_up:
+            nn.init.normal_(self.up_gate_weight, mean=0.0, std=0.02)
+        else:
+            nn.init.normal_(self.up_weight, mean=0.0, std=0.02)
+            nn.init.normal_(self.gate_weight, mean=0.0, std=0.02)
         nn.init.normal_(self.down_weight, mean=0.0, std=self.down_init_std)
 
     def _load_from_state_dict(
@@ -161,7 +271,22 @@ class GroupedExperts(nn.Module):
     ):
         # Checkpoints store global expert tensors.  Each EP rank loads only
         # its contiguous expert slice before FSDP wrapping.
-        for name in ("up_weight", "gate_weight", "down_weight"):
+        fused_key = prefix + "up_gate_weight"
+        up_key, gate_key = prefix + "up_weight", prefix + "gate_weight"
+        if self.fused_mlp_gate_up and fused_key not in state_dict:
+            if up_key in state_dict and gate_key in state_dict:
+                state_dict[fused_key] = torch.cat(
+                    [state_dict.pop(up_key), state_dict.pop(gate_key)], dim=1
+                )
+        elif not self.fused_mlp_gate_up and fused_key in state_dict:
+            up, gate = state_dict.pop(fused_key).split(self.dim_ffn, dim=1)
+            state_dict[up_key], state_dict[gate_key] = up, gate
+        parameter_names = (
+            ("up_gate_weight", "down_weight")
+            if self.fused_mlp_gate_up
+            else ("up_weight", "gate_weight", "down_weight")
+        )
+        for name in parameter_names:
             key = prefix + name
             value = state_dict.get(key)
             if value is not None and value.size(0) == self.n_experts:
@@ -195,15 +320,64 @@ class GroupedExperts(nn.Module):
             return x.new_empty((0, weight.size(1)))
         return torch.cat(chunks, dim=0)
 
+    @staticmethod
+    def _linear_per_expert(
+        x: Tensor, weight: Tensor, host_counts: list[int]
+    ) -> Tensor:
+        """Run one library-backed linear per contiguous expert segment."""
+        chunks = []
+        start = 0
+        for expert_idx, count in enumerate(host_counts):
+            end = start + int(count)
+            chunks.append(F.linear(x[start:end], weight[expert_idx]))
+            start = end
+        if not chunks:
+            return x.new_empty((0, weight.size(1)))
+        return torch.cat(chunks, dim=0)
+
+    def _use_individual_linear(
+        self, x: Tensor, host_counts: list[int] | None
+    ) -> bool:
+        if (
+            torch.is_grad_enabled()
+            or not x.is_cuda
+            or x.dtype != torch.bfloat16
+            or host_counts is None
+            or len(host_counts) != self.n_local_experts
+        ):
+            return False
+        counts = [int(count) for count in host_counts]
+        return (
+            all(count >= 0 for count in counts)
+            and sum(counts) == x.size(0)
+            and max(counts, default=0) <= self._INDIVIDUAL_LINEAR_MAX_TOKENS
+        )
+
     def forward(
         self,
         x: Tensor,
         counts: Tensor,
         row_scale: Tensor | None = None,
+        offsets: Tensor | None = None,
+        host_counts: list[int] | None = None,
     ) -> Tensor:
-        offsets = counts.cumsum(0, dtype=torch.int32)
-        up = self._grouped_mm(x, self.up_weight, offsets)
-        gate = self._grouped_mm(x, self.gate_weight, offsets)
+        if offsets is None:
+            offsets = counts.cumsum(0, dtype=torch.int32)
+        elif offsets.dtype != torch.int32:
+            offsets = offsets.to(dtype=torch.int32)
+        use_individual_linear = self._use_individual_linear(x, host_counts)
+
+        def project(weight: Tensor) -> Tensor:
+            if use_individual_linear:
+                assert host_counts is not None
+                return self._linear_per_expert(x, weight, host_counts)
+            return self._grouped_mm(x, weight, offsets)
+
+        if self.fused_mlp_gate_up:
+            up, gate = project(self.up_gate_weight).split(self.dim_ffn, dim=-1)
+        else:
+            up = project(self.up_weight)
+            gate = project(self.gate_weight)
         hidden = apply_swiglu(gate, up, self.swiglu_backend)
         if row_scale is not None:
             if row_scale.ndim != 1 or row_scale.size(0) != hidden.size(0):
@@ -212,6 +386,9 @@ class GroupedExperts(nn.Module):
             # routing weights at the smaller FFN width reduces the row-scale
             # kernel's memory traffic versus scaling the model-width output.
             hidden = hidden * row_scale.to(hidden.dtype).unsqueeze(-1)
+        if use_individual_linear:
+            assert host_counts is not None
+            return self._linear_per_expert(hidden, self.down_weight, host_counts)
         return self._grouped_mm(hidden, self.down_weight, offsets)
 
 
@@ -234,6 +411,7 @@ class DeepSeekMoE(nn.Module):
         moe_shared_expert_overlap: bool = False,
         moe_route_scale_before_down: bool = False,
         swiglu_backend: str = "torch",
+        fused_mlp_gate_up: bool = False,
         router_score_dtype: str = "model",
     ):
         super().__init__()
@@ -282,6 +460,7 @@ class DeepSeekMoE(nn.Module):
                     dim_ffn,
                     down_init_std=down_init_std,
                     swiglu_backend=swiglu_backend,
+                    fused_mlp_gate_up=fused_mlp_gate_up,
                 )
                 for _ in range(n_shared_experts)
             ]
@@ -293,6 +472,7 @@ class DeepSeekMoE(nn.Module):
             down_init_std=down_init_std,
             expert_parallel_size=expert_parallel_size,
             swiglu_backend=swiglu_backend,
+            fused_mlp_gate_up=fused_mlp_gate_up,
         )
 
     def forward(self, x: Tensor):
@@ -423,15 +603,23 @@ class DeepSeekMoE(nn.Module):
             do_cpu_sync=self.deepep_cpu_sync,
         )
         recv_weights = recv_weights[: recv_x.size(0)]
+        host_counts = state.counts if isinstance(state.counts, list) else None
         if self.moe_route_scale_before_down:
             expert_out = self.routed_experts(
                 recv_x,
                 counts,
                 row_scale=recv_weights,
+                offsets=state.expert_offsets,
+                host_counts=host_counts,
             )
             weighted_out = expert_out
         else:
-            expert_out = self.routed_experts(recv_x, counts)
+            expert_out = self.routed_experts(
+                recv_x,
+                counts,
+                offsets=state.expert_offsets,
+                host_counts=host_counts,
+            )
             weighted_out = expert_out * recv_weights.to(expert_out.dtype).unsqueeze(-1)
         if not state.do_cpu_sync:
             valid_rows = (

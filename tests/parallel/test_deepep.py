@@ -123,5 +123,7 @@ def test_no_cpu_sync_recovers_alignment_padded_gpu_counts():
     psum = torch.tensor([3, 6, 9, 15], dtype=torch.int32)
 
     counts = deepep._counts_from_gpu_prefix(psum, alignment=4)
+    offsets = deepep._offsets_from_gpu_prefix(psum, alignment=4)
 
     assert counts.tolist() == [4, 4, 4, 4]
+    assert offsets.tolist() == [4, 8, 12, 16]

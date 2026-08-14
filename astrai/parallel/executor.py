@@ -12,6 +12,7 @@ import torch.nn as nn
 from torch.distributed.fsdp import (
     FSDPModule,
     FullStateDictConfig,
+    ShardingStrategy,
     StateDictType,
     fully_shard,
 )
@@ -129,6 +130,18 @@ class BaseExecutor:
     def backward(self, loss: torch.Tensor):
         loss.backward()
 
+    def synchronize_gradients(self, model: nn.Module) -> None:
+        """Synchronize gradients not managed by the wrapping backend."""
+
+    @property
+    def optimizer_checkpoint_rank(self) -> Optional[int]:
+        """Rank suffix to save, or ``None`` for a redundant replica."""
+        return get_rank()
+
+    @property
+    def optimizer_checkpoint_world_size(self) -> int:
+        return get_world_size()
+
     def unwrap_model(self, model: nn.Module):
         return model.state_dict()
 
@@ -210,11 +223,36 @@ class DDPExecutor(BaseExecutor):
             mixed_precision=mixed_precision,
             device_mesh=device_mesh,
         )
+        self._original_model: Optional[nn.Module] = None
+        self._local_expert_modules: list[nn.Module] = []
+        self._local_expert_param_ids: set[int] = set()
 
     def _prepare_model(self, model: nn.Module) -> nn.Module:
         if not self.use_distributed:
             logger.warning("DDP backend selected but world_size=1, model not wrapped")
             return model
+        self._original_model = model
+        self._local_expert_modules = [
+            module
+            for module in model.modules()
+            if getattr(module, "_expert_parallel_local", False)
+        ]
+        ignored_names = []
+        for module_name, module in model.named_modules():
+            if not getattr(module, "_expert_parallel_local", False):
+                continue
+            for param_name, parameter in module.named_parameters(recurse=False):
+                ignored_names.append(f"{module_name}.{param_name}")
+                self._local_expert_param_ids.add(id(parameter))
+        if ignored_names:
+            # DDP honors this attribute when constructing its reducer. EP
+            # expert weights are different on every rank and must not be
+            # broadcast or gradient-all-reduced as data-parallel parameters.
+            model._ddp_params_and_buffers_to_ignore = ignored_names
+            logger.info(
+                "DDP excluding %d rank-local expert parameters", len(ignored_names)
+            )
+
         local_rank = int(os.environ.get("LOCAL_RANK", get_rank()))
         model = DDP(
             model,
@@ -232,8 +270,55 @@ class DDPExecutor(BaseExecutor):
 
     def unwrap_model(self, model: nn.Module):
         if isinstance(model, DDP):
-            return model.module.state_dict()
+            state_dict = model.module.state_dict()
+            # Checkpoints remain portable: concatenate each rank's contiguous
+            # expert slice back into the global expert dimension.
+            for module_name, module in model.module.named_modules():
+                if not getattr(module, "_expert_parallel_local", False):
+                    continue
+                if module.expert_parallel_size != get_world_size():
+                    raise RuntimeError(
+                        "checkpoint gathering currently requires "
+                        "expert_parallel_size == world_size"
+                    )
+                for param_name, param in module.named_parameters(recurse=False):
+                    gathered = [torch.empty_like(param) for _ in range(get_world_size())]
+                    dist.all_gather(gathered, param.detach(), group=module.process_group)
+                    if get_rank() == 0:
+                        state_dict[f"{module_name}.{param_name}"] = torch.cat(
+                            gathered, dim=0
+                        ).cpu()
+            return state_dict
         return model.state_dict()
+
+    def clip_grad_norm(self, model: nn.Module, max_norm: float) -> float:
+        if not isinstance(model, DDP) or not self._local_expert_param_ids:
+            return super().clip_grad_norm(model, max_norm)
+        # Replicated gradients are identical after DDP reduction and count
+        # once globally; rank-local EP gradients count once per expert rank.
+        rank = get_rank()
+        counted_grads = []
+        all_grads = []
+        for parameter in model.module.parameters():
+            if parameter.grad is None:
+                continue
+            all_grads.append(parameter.grad)
+            is_local_expert = id(parameter) in self._local_expert_param_ids
+            if is_local_expert or rank == 0:
+                counted_grads.append(parameter.grad.detach())
+        if counted_grads:
+            grad_norms = torch._foreach_norm(counted_grads, 2)
+            local_sq = torch.stack(
+                [norm.float().square() for norm in grad_norms]
+            ).sum()
+        else:
+            local_sq = torch.zeros((), device=next(model.parameters()).device)
+        dist.all_reduce(local_sq, op=dist.ReduceOp.SUM)
+        total_norm = local_sq.sqrt()
+        scale = (max_norm / (total_norm + 1e-6)).clamp(max=1.0)
+        if all_grads:
+            torch._foreach_mul_(all_grads, scale)
+        return total_norm.item()
 
 
 @ExecutorFactory.register("fsdp")
@@ -277,6 +362,10 @@ class FSDPExecutor(BaseExecutor):
             if v is not None
         }
         self._original_model: Optional[nn.Module] = None
+        self._local_expert_modules: list[nn.Module] = []
+        self._local_expert_param_ids: set[int] = set()
+        self._expert_data_parallel_size = 1
+        self._expert_parallel_size = get_world_size()
 
     def _prepare_model(self, model: nn.Module) -> nn.Module:
         if not self.use_distributed:
@@ -288,6 +377,33 @@ class FSDPExecutor(BaseExecutor):
             for module in model.modules()
             if getattr(module, "_expert_parallel_local", False)
         ]
+        self._local_expert_modules = local_expert_modules
+        self._local_expert_param_ids = {
+            id(parameter)
+            for module in local_expert_modules
+            for parameter in module.parameters(recurse=False)
+        }
+        expert_dp_sizes = {
+            int(getattr(module, "expert_data_parallel_size", 1))
+            for module in local_expert_modules
+        }
+        if len(expert_dp_sizes) > 1:
+            raise RuntimeError(
+                "all routed-expert modules must use the same expert DP size"
+            )
+        self._expert_data_parallel_size = next(iter(expert_dp_sizes), 1)
+        if local_expert_modules:
+            self._expert_parallel_size = int(
+                local_expert_modules[0].expert_parallel_size
+            )
+        if self._expert_data_parallel_size > 1:
+            sharding = self._fsdp_kwargs.get("sharding_strategy")
+            if sharding is not ShardingStrategy.NO_SHARD:
+                raise RuntimeError(
+                    "expert data-parallel replicas currently require FSDP "
+                    "NO_SHARD so replicated shared-parameter gradients and "
+                    "expert gradients have an unambiguous clipping norm"
+                )
         if local_expert_modules:
             configured = list(self._fsdp_kwargs.get("ignored_modules", []))
             self._fsdp_kwargs["ignored_modules"] = [
@@ -298,10 +414,51 @@ class FSDPExecutor(BaseExecutor):
                 "FSDP excluding %d rank-local grouped-expert modules",
                 len(local_expert_modules),
             )
-        device_id = torch.device("cuda", get_rank())
+        local_rank = int(os.environ.get("LOCAL_RANK", get_rank()))
+        device_id = torch.device("cuda", local_rank)
         model = FSDP(model, device_id=device_id, **self._fsdp_kwargs)
-        logger.info("Model wrapped with FSDP (world_size=%d)", get_world_size())
+        logger.info(
+            "Model wrapped with FSDP (world_size=%d, local_rank=%d, expert_dp=%d)",
+            get_world_size(),
+            local_rank,
+            self._expert_data_parallel_size,
+        )
         return model
+
+    def synchronize_gradients(self, model: nn.Module) -> None:
+        if self._expert_data_parallel_size == 1:
+            return
+        pending = []
+        gradients = []
+        for module in self._local_expert_modules:
+            group = module.expert_data_parallel_group
+            for parameter in module.parameters(recurse=False):
+                if parameter.grad is None:
+                    continue
+                gradients.append(parameter.grad)
+                pending.append(
+                    dist.all_reduce(parameter.grad, group=group, async_op=True)
+                )
+        for work in pending:
+            work.wait()
+        if gradients:
+            torch._foreach_mul_(gradients, 1.0 / self._expert_data_parallel_size)
+
+    @property
+    def optimizer_checkpoint_rank(self) -> Optional[int]:
+        # Optimizer states are identical between synchronized expert-DP
+        # replicas. Persist only the first EP replica; loader ranks in later
+        # replicas map back with rank % expert_parallel_size.
+        rank = get_rank()
+        if self._expert_data_parallel_size > 1 and rank >= self._expert_parallel_size:
+            return None
+        return rank
+
+    @property
+    def optimizer_checkpoint_world_size(self) -> int:
+        if self._expert_data_parallel_size > 1:
+            return self._expert_parallel_size
+        return get_world_size()
 
     def _no_sync(self, model: nn.Module):
         if isinstance(model, FSDP):
@@ -309,6 +466,41 @@ class FSDPExecutor(BaseExecutor):
         return contextlib.nullcontext()
 
     def clip_grad_norm(self, model: nn.Module, max_norm: float) -> float:
+        if self._expert_data_parallel_size > 1:
+            # NO_SHARD shared parameters are identical on every global rank;
+            # synchronized expert shards are identical only within their DP
+            # replica group. Count shared gradients on global rank 0 and each
+            # expert shard on the first replica, then reduce the true norm.
+            rank = get_rank()
+            counted_grads = []
+            all_grads = []
+            for module in self._original_model.modules():
+                is_expert = getattr(module, "_expert_parallel_local", False)
+                count_expert = (
+                    is_expert
+                    and int(getattr(module, "expert_data_parallel_rank", 0)) == 0
+                )
+                for parameter in module.parameters(recurse=False):
+                    if parameter.grad is None:
+                        continue
+                    all_grads.append(parameter.grad)
+                    if count_expert or (not is_expert and rank == 0):
+                        counted_grads.append(parameter.grad.detach())
+            if counted_grads:
+                norms = torch._foreach_norm(counted_grads, 2)
+                local_sq = torch.stack(
+                    [norm.float().square() for norm in norms]
+                ).sum()
+            else:
+                local_sq = torch.zeros(
+                    (), device=next(model.parameters()).device, dtype=torch.float32
+                )
+            dist.all_reduce(local_sq, op=dist.ReduceOp.SUM)
+            total_norm = local_sq.sqrt()
+            scale = (max_norm / (total_norm + 1e-6)).clamp(max=1.0)
+            if all_grads:
+                torch._foreach_mul_(all_grads, scale)
+            return total_norm.item()
         if isinstance(model, FSDP) and self.use_distributed:
             total_norm = model.clip_grad_norm_(max_norm)
             if isinstance(total_norm, torch.Tensor):
@@ -331,15 +523,16 @@ class FSDPExecutor(BaseExecutor):
             for module_name, module in self._original_model.named_modules():
                 if not getattr(module, "_expert_parallel_local", False):
                     continue
-                if module.expert_parallel_size != get_world_size():
-                    raise RuntimeError(
-                        "checkpoint gathering currently requires "
-                        "expert_parallel_size == world_size"
-                    )
                 for param_name, param in module.named_parameters(recurse=False):
-                    gathered = [torch.empty_like(param) for _ in range(get_world_size())]
+                    gathered = [
+                        torch.empty_like(param)
+                        for _ in range(module.expert_parallel_size)
+                    ]
                     dist.all_gather(gathered, param.detach(), group=module.process_group)
-                    if get_rank() == 0:
+                    if (
+                        get_rank() == 0
+                        and module.expert_parallel_rank == 0
+                    ):
                         key = f"{module_name}.{param_name}"
                         state_dict[key] = torch.cat(gathered, dim=0).cpu()
             return state_dict

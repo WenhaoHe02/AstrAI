@@ -60,6 +60,29 @@ class TrainContext:
             * self.config.grad_accum_steps
         )
 
+    @property
+    def global_batch_tokens(self) -> Optional[int]:
+        if self.config.sequence_length is None:
+            return None
+        return (
+            self.config.batch_per_device
+            * self.world_size
+            * self.config.grad_accum_steps
+            * self.config.sequence_length
+        )
+
+    @property
+    def seen_tokens(self) -> Optional[int]:
+        if self.config.sequence_length is None:
+            return None
+        return self.consumed_samples * self.config.sequence_length
+
+    @property
+    def effective_epochs(self) -> Optional[float]:
+        if self.seen_tokens is None or self.config.unique_train_tokens is None:
+            return None
+        return self.seen_tokens / self.config.unique_train_tokens
+
 
 class TrainContextBuilder:
     def __init__(
@@ -149,6 +172,13 @@ class TrainContextBuilder:
             cfg.scheduler_fn,
             before_wrap=_before_wrap,
         )
+        # Runtime model overrides (fused kernels, dispatch backend, etc.) must
+        # be persisted in the next checkpoint rather than overwritten by the
+        # source checkpoint's older config.
+        prepared_model = getattr(context.model, "module", context.model)
+        prepared_config = getattr(prepared_model, "config", None)
+        if prepared_config is not None:
+            context.model_config = prepared_config.to_dict()
 
         train_dataset = cfg.dataset
         val_dataset = cfg.val_dataset

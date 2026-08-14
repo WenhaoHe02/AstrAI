@@ -4,7 +4,7 @@ AutoModel base class for model loading and saving.
 
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Self, Union
+from typing import Mapping, Self, Union
 
 import torch.nn as nn
 
@@ -56,6 +56,7 @@ class AutoModel(BaseFactory["AutoModel"], nn.Module):
         path: Union[str, Path],
         disable_random_init: bool = True,
         strict: bool = True,
+        config_overrides: Mapping[str, object] | None = None,
     ) -> nn.Module:
 
         model_path = Path(path)
@@ -66,6 +67,10 @@ class AutoModel(BaseFactory["AutoModel"], nn.Module):
 
         raw = load_model_config(str(model_path))
         config = ConfigFactory.load(raw)
+        for key, value in (config_overrides or {}).items():
+            if not hasattr(config, key):
+                raise ValueError(f"Unknown model config override: {key!r}")
+            setattr(config, key, value)
         model_type = config.model_type or "autoregressive_lm"
 
         actual_cls = AutoModel.get_component_class(model_type)

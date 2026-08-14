@@ -171,6 +171,13 @@ class BFDSplitPacking(BFDPacking):
             split_vals: List[List[int]] = []
             for val, starts in zip(vals, chunk_bounds):
                 for start in starts:
-                    split_vals.append(val[start : start + max_packed_len])
+                    chunk = val[start : start + max_packed_len]
+                    if key == "position_ids":
+                        # Each split chunk becomes an independent packed
+                        # document, so its positions must restart at zero.
+                        # Keeping the original offset can hide a boundary
+                        # when BFD places this chunk after a shorter record.
+                        chunk = list(range(len(chunk)))
+                    split_vals.append(chunk)
             result[key] = split_vals
         return result

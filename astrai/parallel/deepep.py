@@ -72,10 +72,11 @@ class DeepEPDispatchState:
     num_sms: int = 0
     handle: Any = None
     counts: list[int] | Tensor | None = None
+    expert_offsets: Tensor | None = None
 
 
-def _counts_from_gpu_prefix(psum: Tensor, alignment: int) -> Tensor:
-    """Recover padded expert counts from DeepEP's expand-mode GPU prefix."""
+def _offsets_from_gpu_prefix(psum: Tensor, alignment: int) -> Tensor:
+    """Return aligned grouped-GEMM end offsets from DeepEP's GPU prefix."""
     aligned_ends = (
         torch.div(
             psum + alignment - 1,
@@ -84,6 +85,12 @@ def _counts_from_gpu_prefix(psum: Tensor, alignment: int) -> Tensor:
         )
         * alignment
     )
+    return aligned_ends.to(dtype=torch.int32)
+
+
+def _counts_from_gpu_prefix(psum: Tensor, alignment: int) -> Tensor:
+    """Recover padded expert counts from DeepEP's expand-mode GPU prefix."""
+    aligned_ends = _offsets_from_gpu_prefix(psum, alignment)
     starts = torch.cat((torch.zeros_like(aligned_ends[:1]), aligned_ends[:-1]))
     return aligned_ends - starts
 
@@ -121,10 +128,17 @@ class _Dispatch(torch.autograd.Function):
         if state.do_cpu_sync:
             state.counts = handle.num_recv_tokens_per_expert_list
         else:
-            state.counts = _counts_from_gpu_prefix(
+            state.expert_offsets = _offsets_from_gpu_prefix(
                 handle.psum_num_recv_tokens_per_expert,
                 state.expert_alignment,
             )
+            starts = torch.cat(
+                (
+                    torch.zeros_like(state.expert_offsets[:1]),
+                    state.expert_offsets[:-1],
+                )
+            )
+            state.counts = state.expert_offsets - starts
         ctx.state = state
         return recv_x, recv_topk_weights
 

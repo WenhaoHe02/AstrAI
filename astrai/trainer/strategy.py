@@ -92,6 +92,34 @@ def make_doc_boundary_mask(position_ids: Tensor) -> Tensor:
     return (same_doc & causal).unsqueeze(1)
 
 
+def make_document_cu_seqlens(position_ids: Tensor) -> tuple[Tensor, int]:
+    """Build Flash-varlen sequence metadata from reset position ids.
+
+    Every dataloader row is an independent attention sequence even when its
+    first token is a continuation from the underlying token stream.  Explicit
+    zero positions add the packed-document boundaries inside each row.
+    """
+    if position_ids.ndim != 2:
+        raise ValueError(
+            "position_ids must have shape [batch, sequence], got "
+            f"{tuple(position_ids.shape)}"
+        )
+    starts = position_ids.eq(0).clone()
+    starts[:, 0] = True
+    flat_starts = starts.flatten().nonzero(as_tuple=False).flatten()
+    total_tokens = position_ids.numel()
+    cu_seqlens = torch.cat(
+        [
+            flat_starts.to(dtype=torch.int32),
+            torch.tensor(
+                [total_tokens], dtype=torch.int32, device=position_ids.device
+            ),
+        ]
+    )
+    lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+    return cu_seqlens, int(lengths.max().item())
+
+
 class BaseStrategy(ABC):
     """Abstract base class for training strategies.
 
@@ -246,10 +274,31 @@ class SEQStrategy(BaseStrategy):
             )
 
     def compute_loss(self, batch: Dict[str, Tensor]) -> Tensor:
+        document_cu_seqlens = None
+        document_max_seqlen = None
+        cpu_position_ids = batch.get("position_ids")
+        if cpu_position_ids is not None:
+            document_cu_seqlens, document_max_seqlen = (
+                make_document_cu_seqlens(cpu_position_ids)
+            )
         batch = move_to_device(batch, self.device)
         input_ids, target_ids = batch["input_ids"], batch["target_ids"]
+        position_ids = batch.get("position_ids")
+        if position_ids is not None:
+            loss_mask = batch.get("loss_mask")
+            if loss_mask is None:
+                raise ValueError(
+                    "document-aware seq batches require a loss_mask"
+                )
+            target_ids = target_ids.masked_fill(~loss_mask, -100)
+            document_cu_seqlens = document_cu_seqlens.to(
+                self.device, non_blocking=True
+            )
         outputs = self.model(
             input_ids=input_ids,
+            position_ids=position_ids,
+            document_cu_seqlens=document_cu_seqlens,
+            document_max_seqlen=document_max_seqlen,
             target_ids=target_ids if self.loss_backend == "liger" else None,
             loss_backend=self.loss_backend,
             label_smoothing=self.label_smoothing,
@@ -261,6 +310,7 @@ class SEQStrategy(BaseStrategy):
             loss = F.cross_entropy(
                 input=logits.flatten(0, 1).float(),
                 target=target_ids.flatten(),
+                ignore_index=-100,
                 label_smoothing=self.label_smoothing,
             )
 

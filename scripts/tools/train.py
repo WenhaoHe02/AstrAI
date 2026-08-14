@@ -5,6 +5,7 @@ from functools import partial
 from typing import Any, Callable, Dict, Optional
 
 import torch
+import torch.distributed as dist
 import torch.optim as optim
 from torch import Tensor, nn
 from torch.distributed.fsdp import ShardingStrategy
@@ -31,6 +32,7 @@ class MatrixAwareOptimizer(optim.Optimizer):
         nesterov: bool = True,
         ns_steps: int = 5,
         adjust_lr_fn: str = "match_rms_adamw",
+        enable_muon: bool = False,
     ):
         defaults = dict(
             lr=lr,
@@ -48,7 +50,7 @@ class MatrixAwareOptimizer(optim.Optimizer):
         for name, param in model.named_parameters():
             if not param.requires_grad:
                 continue
-            if (
+            if enable_muon and (
                 param.dim() == 2
                 and "norm" not in name
                 and "bias" not in name
@@ -113,11 +115,193 @@ class MatrixAwareOptimizer(optim.Optimizer):
     def load_state_dict(self, state_dict: Dict[str, Any]):
         if self.muon is not None and "muon" in state_dict:
             self.muon.load_state_dict(state_dict["muon"])
-        self.adamw.load_state_dict(state_dict["adamw"])
+        adamw_state = self._expand_zero2_adamw_state(state_dict["adamw"])
+        self.adamw.load_state_dict(adamw_state)
         self.param_groups = [
             *(self.muon.param_groups if self.muon is not None else []),
             *self.adamw.param_groups,
         ]
+
+    def _expand_zero2_adamw_state(self, state_dict: Dict[str, Any]):
+        """Convert the old FSDP ZeRO-2 flat state to replicated AdamW state.
+
+        SHARD_GRAD_OP stores all non-expert parameters as one flat optimizer
+        shard per rank, while ignored EP expert tensors already have complete
+        rank-local states.  NO_SHARD exposes the original parameters again.
+        Reassemble the flat moments with NCCL, split them in original parameter
+        order, and retain the local expert moments verbatim.
+        """
+        if self.muon is not None or not dist.is_available() or not dist.is_initialized():
+            return state_dict
+        saved_state = state_dict.get("state", {})
+        params = self.adamw.param_groups[0]["params"]
+        if not saved_state or not params:
+            return state_dict
+        first_entry = next(iter(saved_state.values()))
+        if "exp_avg" not in first_entry:
+            return state_dict
+
+        # Rank-local grouped-expert parameters are 3D and remain complete in
+        # each old rank checkpoint. Map them by traversal order rather than
+        # numeric parameter ID so QKV/gate-up parameter fusion can change the
+        # number of intervening non-expert parameters without losing moments.
+        saved_expert_ids = [
+            param_id
+            for param_id in sorted(saved_state)
+            if saved_state[param_id]["exp_avg"].ndim == 3
+        ]
+        current_expert_ids = [
+            param_id for param_id, parameter in enumerate(params) if parameter.ndim == 3
+        ]
+        expert_state_by_current_id = {}
+        saved_expert_cursor = 0
+        expert_layout_changed = len(saved_expert_ids) != len(current_expert_ids)
+        for current_id in current_expert_ids:
+            current_shape = tuple(params[current_id].shape)
+            if saved_expert_cursor >= len(saved_expert_ids):
+                raise RuntimeError(
+                    "cannot migrate optimizer state: missing rank-local expert state"
+                )
+            saved_id = saved_expert_ids[saved_expert_cursor]
+            saved_entry = saved_state[saved_id]
+            saved_shape = tuple(saved_entry["exp_avg"].shape)
+            if saved_shape == current_shape:
+                expert_state_by_current_id[current_id] = saved_entry
+                saved_expert_cursor += 1
+                continue
+            # Legacy routed experts store up and gate separately as [E,F,D].
+            # The fused layout stores [E,2F,D], preserving values by concat.
+            if saved_expert_cursor + 1 < len(saved_expert_ids):
+                next_entry = saved_state[saved_expert_ids[saved_expert_cursor + 1]]
+                if (
+                    len(current_shape) == 3
+                    and saved_shape == tuple(next_entry["exp_avg"].shape)
+                    and current_shape
+                    == (saved_shape[0], 2 * saved_shape[1], saved_shape[2])
+                ):
+                    expert_state_by_current_id[current_id] = {
+                        "step": saved_entry["step"],
+                        "exp_avg": torch.cat(
+                            [saved_entry["exp_avg"], next_entry["exp_avg"]], dim=1
+                        ),
+                        "exp_avg_sq": torch.cat(
+                            [saved_entry["exp_avg_sq"], next_entry["exp_avg_sq"]],
+                            dim=1,
+                        ),
+                    }
+                    expert_layout_changed = True
+                    saved_expert_cursor += 2
+                    continue
+            raise RuntimeError(
+                "cannot migrate optimizer state: rank-local expert shape "
+                f"{saved_shape} cannot map to {current_shape}"
+            )
+        if saved_expert_cursor != len(saved_expert_ids):
+            raise RuntimeError(
+                "cannot migrate optimizer state: unused rank-local expert states "
+                f"({len(saved_expert_ids) - saved_expert_cursor})"
+            )
+        saved_expert_ids = set(saved_expert_ids)
+        current_expert_ids = set(current_expert_ids)
+        needs_migration = expert_layout_changed or any(
+            param_id not in current_expert_ids
+            and (
+                param_id not in saved_state
+                or tuple(saved_state[param_id]["exp_avg"].shape)
+                != tuple(parameter.shape)
+            )
+            for param_id, parameter in enumerate(params)
+        )
+        if not needs_migration:
+            return state_dict
+
+        expected_numel = sum(
+            parameter.numel()
+            for param_id, parameter in enumerate(params)
+            if param_id not in current_expert_ids
+        )
+        gathered_moments = {}
+        device = params[0].device
+        for key in ("exp_avg", "exp_avg_sq"):
+            # FSDP maps a rank's contiguous flat shard back across multiple
+            # original parameter IDs. Re-pack those fragments in ID order.
+            local = torch.cat(
+                [
+                    saved_state[param_id][key].flatten()
+                    for param_id in sorted(saved_state)
+                    if param_id not in saved_expert_ids
+                ]
+            ).to(device=device, non_blocking=True)
+            if local.numel() == expected_numel:
+                # Replicated legacy AdamW checkpoint: only parameter fusion
+                # changed IDs/shapes, so the local flat order is already full.
+                gathered_moments[key] = local
+                continue
+            local_size = torch.tensor([local.numel()], device=device, dtype=torch.int64)
+            size_list = [torch.empty_like(local_size) for _ in range(dist.get_world_size())]
+            dist.all_gather(size_list, local_size)
+            sizes = [int(value.item()) for value in size_list]
+            max_size = max(sizes)
+            if local.numel() < max_size:
+                local = torch.nn.functional.pad(local, (0, max_size - local.numel()))
+            gathered = torch.empty(
+                dist.get_world_size() * max_size, dtype=local.dtype, device=device
+            )
+            dist.all_gather_into_tensor(gathered, local.contiguous())
+            rank_chunks = gathered.view(dist.get_world_size(), max_size)
+            full = torch.cat(
+                [rank_chunks[rank, :size] for rank, size in enumerate(sizes)]
+            )
+            if full.numel() < expected_numel:
+                raise RuntimeError(
+                    "cannot migrate ZeRO-2 optimizer state: gathered flat size "
+                    f"{full.numel()} < expected {expected_numel}"
+                )
+            # Any divisibility padding added by FSDP is at the end.
+            gathered_moments[key] = full[:expected_numel]
+
+        current_param_groups = self.adamw.state_dict()["param_groups"]
+        for current_group, saved_group in zip(
+            current_param_groups, state_dict["param_groups"]
+        ):
+            current_params = current_group["params"]
+            current_group.update(
+                {key: value for key, value in saved_group.items() if key != "params"}
+            )
+            current_group["params"] = current_params
+        migrated = {"state": {}, "param_groups": current_param_groups}
+        flat_step = next(
+            saved_state[param_id]["step"]
+            for param_id in sorted(saved_state)
+            if param_id not in saved_expert_ids
+        )
+        offset = 0
+        for param_id, parameter in enumerate(params):
+            if param_id in current_expert_ids:
+                migrated["state"][param_id] = expert_state_by_current_id[param_id]
+                continue
+            end = offset + parameter.numel()
+            migrated["state"][param_id] = {
+                "step": flat_step,
+                "exp_avg": gathered_moments["exp_avg"][offset:end].view(
+                    parameter.shape
+                ),
+                "exp_avg_sq": gathered_moments["exp_avg_sq"][offset:end].view(
+                    parameter.shape
+                ),
+            }
+            offset = end
+        if offset != expected_numel:
+            raise RuntimeError(
+                f"optimizer migration consumed {offset} values, expected {expected_numel}"
+            )
+        logger.info(
+            "Migrated ZeRO-2 AdamW state to replicated layout: %.3fB values, "
+            "%d rank-local expert tensors preserved",
+            expected_numel / 1e9,
+            len(current_expert_ids),
+        )
+        return migrated
 
 
 def parse_args() -> argparse.Namespace:
@@ -177,6 +361,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=1.0,
         help="Max gradient norm for clipping. None disables clipping.",
+    )
+    parser.add_argument(
+        "--optimizer_type",
+        choices=["adamw", "muon"],
+        default="adamw",
+        help="Optimizer for visible 2D weights. Existing pretraining checkpoints use AdamW.",
     )
     parser.add_argument(
         "--weight_decay",
@@ -333,6 +523,24 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--attention_backend",
+        choices=["auto", "flash_sdpa", "transformer_engine"],
+        default=None,
+        help="Attention kernel backend; Transformer Engine selects Hopper fused attention.",
+    )
+    parser.add_argument(
+        "--fused_qkv",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Fuse GQA Q/K/V projections into one checkpoint-compatible GEMM.",
+    )
+    parser.add_argument(
+        "--fused_mlp_gate_up",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Fuse dense/shared and routed-expert up/gate projections.",
+    )
+    parser.add_argument(
         "--moe_route_scale_before_down",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -347,6 +555,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=5000,
         help="Number of iters between checkpoints.",
+    )
+    parser.add_argument(
+        "--ckpt_keep_last",
+        type=int,
+        default=None,
+        help="Keep only the newest N complete checkpoints.",
     )
     parser.add_argument(
         "--checkpoint_after_first_step",
@@ -374,6 +588,15 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help="Ratio to split from training dataset for validation (e.g. 0.05).",
+    )
+    parser.add_argument(
+        "--val_data_root_path",
+        type=str,
+        default=None,
+        help=(
+            "Path to a separate tokenized validation dataset. Preferred over "
+            "--val_split for scaling comparisons and never mixed into training."
+        ),
     )
     parser.add_argument(
         "--val_step",
@@ -433,10 +656,12 @@ def parse_args() -> argparse.Namespace:
         "--fsdp_sharding_strategy",
         type=str,
         default="full_shard",
-        choices=["full_shard", "shard_grad_op"],
+        choices=["full_shard", "shard_grad_op", "no_shard"],
         help=(
             "FSDP sharding level: full_shard is ZeRO-3; shard_grad_op is "
-            "ZeRO-2 and keeps full parameters resident through backward."
+            "ZeRO-2 and keeps full parameters resident through backward; "
+            "no_shard replicates non-expert parameters and removes parameter "
+            "all-gathers (rank-local EP experts remain excluded from FSDP)."
         ),
     )
     parser.add_argument(
@@ -543,14 +768,17 @@ def train(
     grad_accum_steps: int,
     warmup_ratio: float,
     ckpt_interval: int,
+    ckpt_keep_last: Optional[int],
     checkpoint_after_first_step: bool,
     stop_file: str,
     ckpt_dir: str,
     val_split: float,
+    val_data_root_path: Optional[str],
     val_step: int,
     metrics: list[str],
     log_dir: str,
     max_grad_norm: float,
+    optimizer_type: str,
     random_seed: int,
     num_workers: int,
     pin_memory: bool,
@@ -560,6 +788,9 @@ def train(
     residual_norm_backend: Optional[str],
     router_score_dtype: Optional[str],
     deepep_cpu_sync: Optional[bool],
+    attention_backend: Optional[str],
+    fused_qkv: Optional[bool],
+    fused_mlp_gate_up: Optional[bool],
     moe_route_scale_before_down: Optional[bool],
     window_size: int,
     stride: int,
@@ -608,6 +839,12 @@ def train(
         config.router_score_dtype = router_score_dtype
     if deepep_cpu_sync is not None:
         config.deepep_cpu_sync = deepep_cpu_sync
+    if attention_backend is not None:
+        config.attention_backend = attention_backend
+    if fused_qkv is not None:
+        config.fused_qkv = fused_qkv
+    if fused_mlp_gate_up is not None:
+        config.fused_mlp_gate_up = fused_mlp_gate_up
     if moe_route_scale_before_down is not None:
         config.moe_route_scale_before_down = moe_route_scale_before_down
 
@@ -635,11 +872,14 @@ def train(
         executor_kwargs.update(
             gradient_as_bucket_view=True,
             broadcast_buffers=False,
+            static_graph=True,
+            bucket_cap_mb=100,
         )
     elif parallel_mode == "fsdp":
         executor_kwargs["sharding_strategy"] = {
             "full_shard": ShardingStrategy.FULL_SHARD,
             "shard_grad_op": ShardingStrategy.SHARD_GRAD_OP,
+            "no_shard": ShardingStrategy.NO_SHARD,
         }[fsdp_sharding_strategy]
 
     model_fn = partial(create_model, config)
@@ -650,6 +890,19 @@ def train(
         stride=stride,
         tokenizer_path=param_path,
     )
+    val_dataset = None
+    if val_data_root_path is not None:
+        if not os.path.exists(val_data_root_path):
+            raise FileNotFoundError(
+                f"validation dataset not found: {val_data_root_path}"
+            )
+        val_dataset = DatasetFactory.load(
+            train_type=train_type,
+            load_path=val_data_root_path,
+            window_size=window_size,
+            stride=stride,
+            tokenizer_path=param_path,
+        )
 
     optimizer_fn = partial(
         create_optimizer,
@@ -659,6 +912,7 @@ def train(
         nesterov=kwargs.pop("muon_nesterov"),
         ns_steps=kwargs.pop("muon_ns_steps"),
         adjust_lr_fn=kwargs.pop("muon_adjust_lr"),
+        enable_muon=optimizer_type == "muon",
     )
 
     total_steps = compute_total_steps(
@@ -666,6 +920,23 @@ def train(
     )
     warmup_steps = int(warmup_ratio * total_steps)
     warmup_steps = min(warmup_steps, total_steps)
+
+    unique_train_tokens = getattr(dataset, "token_count", None)
+    if not unique_train_tokens:
+        unique_train_tokens = len(dataset) * window_size
+    if val_dataset is None and val_split is not None:
+        unique_train_tokens = max(1, int(unique_train_tokens * (1.0 - val_split)))
+    global_batch_tokens = batch_per_device * nprocs * grad_accum_steps * window_size
+    planned_seen_tokens = total_steps * global_batch_tokens
+    logger.info(
+        "Scaling budget: D=%d unique tokens, K=%d planned seen tokens, "
+        "K/D=%.4f, global_batch_tokens=%d, total_steps=%d",
+        unique_train_tokens,
+        planned_seen_tokens,
+        planned_seen_tokens / unique_train_tokens,
+        global_batch_tokens,
+        total_steps,
+    )
 
     scheduler_kwargs = {"warmup_steps": warmup_steps}
 
@@ -705,6 +976,7 @@ def train(
         model_fn=model_fn,
         strategy=train_type,
         dataset=dataset,
+        val_dataset=val_dataset,
         optimizer_fn=optimizer_fn,
         scheduler_fn=scheduler_fn,
         ckpt_dir=ckpt_dir,
@@ -713,6 +985,7 @@ def train(
         start_epoch=start_epoch,
         start_samples=start_samples,
         ckpt_interval=ckpt_interval,
+        ckpt_keep_last=ckpt_keep_last,
         checkpoint_after_first_step=checkpoint_after_first_step,
         stop_file=stop_file,
         grad_accum_steps=grad_accum_steps,
@@ -729,6 +1002,8 @@ def train(
         start_method=start_method,
         val_split=val_split,
         val_step=val_step,
+        sequence_length=window_size,
+        unique_train_tokens=unique_train_tokens,
         metrics=metrics,
         log_dir=log_dir,
         gradient_checkpointing_modules=grad_ckpt_modules,

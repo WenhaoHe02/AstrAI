@@ -61,6 +61,10 @@ class TrainConfig(BaseConfig):
         default=5000,
         metadata={"help": "Number of optimizer steps between checkpoints."},
     )
+    ckpt_keep_last: Optional[int] = field(
+        default=None,
+        metadata={"help": "Keep only the newest N complete checkpoints."},
+    )
     checkpoint_after_first_step: bool = field(
         default=False,
         metadata={"help": "Save a recovery checkpoint after optimizer step 1."},
@@ -143,6 +147,16 @@ class TrainConfig(BaseConfig):
         default=1000,
         metadata={"help": "Number of optimizer steps between validation runs."},
     )
+    sequence_length: Optional[int] = field(
+        default=None,
+        metadata={"help": "Tokens per packed training sample for scaling metrics."},
+    )
+    unique_train_tokens: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": "Unique tokens D in the training cache, used to report K/D."
+        },
+    )
     neftune_alpha: float = field(
         default=0.0,
         metadata={"help": "NEFTune noise alpha (0=disabled, typical: 5.0)."},
@@ -189,3 +203,9 @@ class TrainConfig(BaseConfig):
         for fld in fields(self):
             if fld.metadata.get("required") and getattr(self, fld.name) is None:
                 raise ValueError(f"TrainConfig.{fld.name} is required but got None.")
+        if self.ckpt_keep_last is not None and self.ckpt_keep_last < 1:
+            raise ValueError("TrainConfig.ckpt_keep_last must be positive or None.")
+        if self.sequence_length is not None and self.sequence_length < 1:
+            raise ValueError("TrainConfig.sequence_length must be positive or None.")
+        if self.unique_train_tokens is not None and self.unique_train_tokens < 1:
+            raise ValueError("TrainConfig.unique_train_tokens must be positive or None.")

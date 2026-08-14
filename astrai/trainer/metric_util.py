@@ -80,3 +80,15 @@ def ctx_get_tokens_per_second(ctx):
 
 def ctx_get_peak_memory_gb(ctx):
     return ctx.peak_memory_gb
+
+
+def ctx_get_global_batch_tokens(ctx):
+    return ctx.global_batch_tokens
+
+
+def ctx_get_seen_tokens(ctx):
+    return ctx.seen_tokens
+
+
+def ctx_get_effective_epochs(ctx):
+    return ctx.effective_epochs

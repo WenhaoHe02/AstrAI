@@ -10,12 +10,13 @@ from collections import defaultdict
 import torch
 import torch.nn.functional as F
 import tqdm
-from datasets import load_dataset
+import requests
 
 from astrai.model import AutoModel
 from astrai.tokenize import AutoTokenizer
 
 MMLU_HF_DATASET = "cais/mmlu"
+HF_ROWS_URL = "https://datasets-server.huggingface.co/rows"
 MMLU_SUBJECTS = [
     "abstract_algebra",
     "anatomy",
@@ -92,7 +93,26 @@ def download_mmlu(data_dir: str):
     letters = ("A", "B", "C", "D")
     split_map = {"dev": "dev", "val": "validation", "test": "test"}
     for local_split, hf_split in split_map.items():
-        ds = load_dataset(MMLU_HF_DATASET, "all", split=hf_split)
+        ds = []
+        offset = 0
+        while True:
+            response = requests.get(
+                HF_ROWS_URL,
+                params={
+                    "dataset": MMLU_HF_DATASET,
+                    "config": "all",
+                    "split": hf_split,
+                    "offset": offset,
+                    "length": 100,
+                },
+                timeout=60,
+            )
+            response.raise_for_status()
+            batch = response.json().get("rows") or []
+            if not batch:
+                break
+            ds.extend((wrapped.get("row") or {}) for wrapped in batch)
+            offset += len(batch)
         grouped: dict[str, list[dict]] = defaultdict(list)
         for item in tqdm.tqdm(ds, desc=f"  {local_split}", leave=False):
             subject = item["subject"]
@@ -262,6 +282,12 @@ def main():
         "--param_path", type=str, default="./params", help="Model directory"
     )
     parser.add_argument(
+        "--tokenizer_path",
+        type=str,
+        default=None,
+        help="Tokenizer directory when a checkpoint contains weights only",
+    )
+    parser.add_argument(
         "--data_dir", type=str, default="./mmlu_data", help="MMLU data directory"
     )
     parser.add_argument("--download", action="store_true", help="Download MMLU data")
@@ -296,8 +322,16 @@ def main():
     if args.download or not os.path.exists(args.data_dir):
         download_mmlu(args.data_dir)
 
-    model = AutoModel.from_pretrained(args.param_path)
-    tokenizer = AutoTokenizer.from_pretrained(args.param_path)
+    model = AutoModel.from_pretrained(
+        args.param_path,
+        config_overrides={
+            "expert_parallel_size": 1,
+            "expert_dispatch_backend": "torch",
+            "deepep_overlap_with_compute": False,
+            "moe_shared_expert_overlap": False,
+        },
+    )
+    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_path or args.param_path)
     device = args.device
     dtype = getattr(torch, args.dtype)
     model.to(device=device, dtype=dtype)

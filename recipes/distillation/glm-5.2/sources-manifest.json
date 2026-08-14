@@ -1,0 +1,77 @@
+{
+  "manifest_version": 1,
+  "generated_at": "2026-07-25",
+  "active_seed_mix": {
+    "name": "AstrAI-Posttrain-Seed-Mix-v1",
+    "records_after_exact_dedup": 2296,
+    "teacher_output_name": "AstrAI-GLM-5.2-Posttrain-Distill-v1",
+    "sources": [
+      {
+        "dataset": "open-r1/OpenR1-Math-220k",
+        "revision": "e4e141ec9dea9f8326f4d347be56105859b2bd68",
+        "subset": "default",
+        "files": ["data/train-00000-of-00010.parquet"],
+        "license": "apache-2.0",
+        "seed_records": 896,
+        "tasks": {"math_reasoning": 768, "critique_math": 128},
+        "usage": "Problems and verification metadata are retained; GLM-5.2 produces new responses."
+      },
+      {
+        "dataset": "nvidia/OpenCodeReasoning",
+        "revision": "20a1ca19c0d050fe9057fc08339d6b370ec1c67a",
+        "subset": "split_0",
+        "files": ["split_0/train-00000-of-00030.parquet"],
+        "license": "cc-by-4.0; upstream problem-source terms must also be reviewed",
+        "seed_records": 632,
+        "tasks": {"code_reasoning": 504, "critique_code": 128},
+        "usage": "Problem statements and reference solutions are retained; GLM-5.2 produces new responses."
+      },
+      {
+        "dataset": "manifoldlabs/Infinity-Instruct",
+        "revision": "bdf12f953ee63be76d4a0612aae79ce62a310216",
+        "subset": "0625",
+        "files": ["0625/train-00000-of-00007.parquet"],
+        "license": "not declared by this mirror; review BAAI/Infinity-Instruct and source-level terms",
+        "seed_records": 507,
+        "tasks": {"general_en": 384, "general_zh": 123},
+        "usage": "User instructions are retained; prior assistant responses are not sent as targets."
+      },
+      {
+        "dataset": "lcccher/Chinese-Instruct",
+        "revision": "fa82bd05464d830b850d25d9e0c544b06aabf692",
+        "subset": "coig-cqia",
+        "files": ["coig-cqia/train.jsonl"],
+        "license": "cc-by-sa-4.0 collection; review source-level terms",
+        "seed_records": 261,
+        "tasks": {"general_zh": 261},
+        "usage": "Chinese prompts supplement the low Chinese count in the Infinity shard."
+      }
+    ]
+  },
+  "downloaded_candidates_not_yet_mixed": [
+    {
+      "dataset": "lcccher/Chinese-Instruct",
+      "revision": "fa82bd05464d830b850d25d9e0c544b06aabf692",
+      "subset": "stem_zh",
+      "files": ["stem_zh/stem_zh.jsonl"],
+      "license": "cc-by-sa-4.0 collection; review source-level terms",
+      "intended_stage": "Chinese STEM SFT and teacher-verified reasoning"
+    },
+    {
+      "dataset": "open-r1/Mixture-of-Thoughts",
+      "revision": "e55fa28006c0d0ec60fb3547520f775dd42d02cd",
+      "subset": "all",
+      "files": ["all/train-00000-of-00015.parquet through all/train-00014-of-00015.parquet"],
+      "license": "source-dependent; review each source field before mixing",
+      "intended_stage": "Long-form reasoning SFT after token-length and source filtering"
+    },
+    {
+      "dataset": "HuggingFaceH4/ultrafeedback_binarized",
+      "revision": "3949bf5f8c17c394422ccfab0c31ea9c20bdeb85",
+      "subset": "train_prefs",
+      "files": ["data/train_prefs-00000-of-00001.parquet"],
+      "license": "mit",
+      "intended_stage": "Preference optimization or reward-model training; not CoT SFT"
+    }
+  ]
+}

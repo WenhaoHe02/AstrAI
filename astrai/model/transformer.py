@@ -110,6 +110,8 @@ class AutoRegressiveLM(AutoModel):
         input_mask: Optional[Tensor] = None,
         paged_cache: Optional[CacheView] = None,
         position_ids: Optional[Tensor] = None,
+        document_cu_seqlens: Optional[Tensor] = None,
+        document_max_seqlen: Optional[int] = None,
         target_ids: Optional[Tensor] = None,
         loss_backend: str = "torch",
         label_smoothing: float = 0.0,
@@ -141,6 +143,8 @@ class AutoRegressiveLM(AutoModel):
                         attn_mask,
                         paged_cache,
                         use_sdpa_causal_mask,
+                        document_cu_seqlens,
+                        document_max_seqlen,
                     )
                 )
                 if layer_router_outputs is not None:
@@ -155,6 +159,8 @@ class AutoRegressiveLM(AutoModel):
                     attn_mask,
                     paged_cache,
                     use_sdpa_causal_mask,
+                    document_cu_seqlens=document_cu_seqlens,
+                    document_max_seqlen=document_max_seqlen,
                     return_router_losses=True,
                 )
                 if layer_router_outputs is not None:

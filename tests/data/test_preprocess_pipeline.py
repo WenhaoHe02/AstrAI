@@ -352,6 +352,21 @@ def test_bfd_split_chunk_alignment():
         assert len(seq) == len(mask)
 
 
+def test_bfd_split_resets_position_ids_for_each_chunk():
+    packer = PackingStrategyFactory.create("bfd_split")
+    keys = {
+        "sequence": [list(range(25))],
+        "position_ids": [list(range(25))],
+    }
+
+    result = packer.apply(keys, 10, _TRU)
+
+    for sequence, position_ids in zip(
+        result["sequence"], result["position_ids"]
+    ):
+        assert position_ids == list(range(len(sequence)))
+
+
 def test_bfd_split_short_unchanged():
     """Sequences under max_packed_len should not be split."""
     packer = PackingStrategyFactory.create("bfd_split")

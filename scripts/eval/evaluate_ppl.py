@@ -16,6 +16,28 @@ from astrai.tokenize import AutoTokenizer
 def _collect_input_files(input_path: str) -> List[str]:
     """Resolve *input_path* to a list of JSONL/JSON files."""
     if os.path.isdir(input_path):
+        manifest_path = os.path.join(input_path, "manifest.json")
+        if os.path.isfile(manifest_path):
+            with open(manifest_path, "r", encoding="utf-8") as handle:
+                manifest = json.load(handle)
+            files = []
+            root = os.path.realpath(input_path)
+            for source in manifest.get("sources", []):
+                filename = source.get("file")
+                if not isinstance(filename, str):
+                    continue
+                candidate = os.path.realpath(os.path.join(root, filename))
+                if os.path.commonpath((root, candidate)) != root:
+                    raise ValueError(
+                        f"manifest source escapes input directory: {filename!r}"
+                    )
+                if not os.path.isfile(candidate):
+                    raise FileNotFoundError(
+                        f"manifest source file does not exist: {candidate}"
+                    )
+                files.append(candidate)
+            if files:
+                return files
         files = []
         for ext in ("*.jsonl", "*.json"):
             files.extend(
@@ -327,6 +349,7 @@ def print_stats(label: str, stats: Dict):
 
 def main(
     param_path: str,
+    tokenizer_path: Optional[str],
     input_path: str,
     output_dir: str,
     text_key: str,
@@ -338,8 +361,19 @@ def main(
     dtype: str = "bfloat16",
 ):
     print(f"Loading model from {param_path} ...")
-    model = AutoModel.from_pretrained(param_path)
-    tokenizer = AutoTokenizer.from_pretrained(param_path)
+    # Checkpoints trained with expert parallelism contain all consolidated
+    # expert weights, but a single-process evaluator must dispatch them
+    # locally instead of trying to initialize the training-time EP group.
+    model = AutoModel.from_pretrained(
+        param_path,
+        config_overrides={
+            "expert_parallel_size": 1,
+            "expert_dispatch_backend": "torch",
+            "deepep_overlap_with_compute": False,
+            "moe_shared_expert_overlap": False,
+        },
+    )
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path or param_path)
     torch_dtype = getattr(torch, dtype)
     model.to(device=device, dtype=torch_dtype)
     model.eval()
@@ -397,6 +431,12 @@ if __name__ == "__main__":
         "--param_path", type=str, required=True, help="Path to the model directory."
     )
     parser.add_argument(
+        "--tokenizer_path",
+        type=str,
+        default=None,
+        help="Optional tokenizer directory when a checkpoint contains weights only.",
+    )
+    parser.add_argument(
         "--input_path",
         type=str,
         required=True,
@@ -452,6 +492,7 @@ if __name__ == "__main__":
     with torch.inference_mode():
         main(
             param_path=args.param_path,
+            tokenizer_path=args.tokenizer_path,
             input_path=args.input_path,
             output_dir=args.output_dir,
             text_key=args.text_key,

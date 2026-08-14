@@ -168,7 +168,17 @@ class Checkpoint:
         state_dict = load_state_dict(save_path / _WEIGHTS_FILE, broadcast=broadcast)
 
         extra = {}
-        rank_optimizer = save_path / f"optimizer.rank{get_rank()}.pt"
+        rank = get_rank()
+        rank_optimizer = save_path / f"optimizer.rank{rank}.pt"
+        if not rank_optimizer.exists() and dist.is_initialized():
+            # Expanding EP=E to EP=E x DP=N reuses the optimizer state for
+            # the corresponding expert shard. Dense ZeRO shards are rebuilt
+            # collectively by the optimizer loader.
+            saved_ep_size = int(config.get("expert_parallel_size", 0) or 0)
+            if saved_ep_size > 0:
+                mapped = save_path / f"optimizer.rank{rank % saved_ep_size}.pt"
+                if mapped.exists():
+                    rank_optimizer = mapped
         if rank_optimizer.exists():
             extra["optimizer"] = load_torch(rank_optimizer, broadcast=False)
         for f in sorted(save_path.iterdir()):
