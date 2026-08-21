@@ -25,3 +25,9 @@ trajectory schema and collection, supervised post-training, preference/reward
 data, RL, recovery/collaboration tasks and leakage-controlled evaluation. The
 end goal is a strong conversational model with SOTA MC agent capability, not a
 benchmark-only policy.
+
+The immediate post-training research assignment is specified in
+`docs/ARGUS_MC_POSTTRAIN_DATA_TASK.md`. Execute it concurrently with base-model
+training where it uses only CPU, storage and network resources. Its first gate
+is an explicit observation/action/episode contract; do not download or generate
+large trajectory corpora before that contract and a streaming validator exist.
