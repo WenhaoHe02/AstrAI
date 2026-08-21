@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "input": {
+    "sections": [
+      {
+        "field": "content",
+        "action": "train",
+        "append_eos": true
+      }
+    ]
+  },
+  "preprocessing": {
+    "max_seq_len": 2048,
+    "packing_strategy": "bfd_split",
+    "max_packed_len": 2048
+  },
+  "output": {
+    "storage_format": "bin",
+    "dtype": {
+      "position_ids": "int16"
+    },
+    "position_ids_mode": "doc_reset"
+  }
+}

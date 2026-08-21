@@ -31,7 +31,9 @@
 !/pyproject.toml
 !/README.md
 !/ARGUS_OBJECTIVE.md
+!/ARGUS_OBJECTIVE_7B_A1B.md
 !/docs/ARGUS_MC_SOTA_HANDOFF.md
+!/docs/OPERATOR_HANDOFF_7B_A1B.md
 # Allow extension modules (only source .py)
 !/astrai/extension/**/*.py
 

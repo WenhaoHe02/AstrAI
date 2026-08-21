@@ -1,0 +1,38 @@
+{
+  "basis": "tokenized_clean_token_count",
+  "target_tokens": 300000000000,
+  "target_language_ratio": {
+    "zh": 0.4,
+    "en": 0.6
+  },
+  "sources": [
+    {
+      "name": "Ultra-FineWeb-zh",
+      "dataset": "openbmb/Ultra-FineWeb",
+      "revision": "02c85641e3d19a854be2e09139c25adaa9518063",
+      "language": "zh",
+      "target_tokens": 120000000000
+    },
+    {
+      "name": "Ultra-FineWeb-en",
+      "dataset": "openbmb/Ultra-FineWeb",
+      "revision": "02c85641e3d19a854be2e09139c25adaa9518063",
+      "language": "en",
+      "target_tokens": 180000000000
+    }
+  ],
+  "selection": {
+    "quality_field": "score",
+    "text_field": "content",
+    "source_field": "source",
+    "sample_unit": "tokens",
+    "preserve_document_boundaries": true,
+    "append_eos": true
+  },
+  "deduplication": {
+    "within_ultra_fineweb": "upstream",
+    "cross_source_exact": true,
+    "cross_source_minhash": true,
+    "validation_contamination_filter": true
+  }
+}
