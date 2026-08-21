@@ -30,6 +30,8 @@
 !/LICENSE
 !/pyproject.toml
 !/README.md
+!/ARGUS_OBJECTIVE.md
+!/docs/ARGUS_MC_SOTA_HANDOFF.md
 # Allow extension modules (only source .py)
 !/astrai/extension/**/*.py
 

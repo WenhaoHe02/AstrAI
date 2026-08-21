@@ -12,9 +12,8 @@ try:
 except ImportError:  # pragma: no cover - exercised only on older PyTorch
     varlen_attn = None
 
-_VARLEN_SUPPORTS_ENABLE_GQA = (
-    varlen_attn is not None
-    and "enable_gqa" in inspect.signature(varlen_attn).parameters
+_VARLEN_PARAMETERS = (
+    inspect.signature(varlen_attn).parameters if varlen_attn is not None else {}
 )
 
 from astrai.factory import BaseFactory
@@ -47,8 +46,16 @@ def _run_varlen_attention(
             "document-aware Flash attention requires "
             "torch.nn.attention.varlen.varlen_attn"
         )
-    kwargs = {"window_size": (-1, 0)}
-    if _VARLEN_SUPPORTS_ENABLE_GQA:
+    kwargs = {}
+    # PyTorch 2.6 exposed causal varlen attention as a left-unbounded
+    # ``window_size``. Newer nightlies removed that argument and added an
+    # explicit ``is_causal`` flag. Support both APIs without dropping the
+    # document boundary mask encoded by ``cu_seqlens``.
+    if "window_size" in _VARLEN_PARAMETERS:
+        kwargs["window_size"] = (-1, 0)
+    if "is_causal" in _VARLEN_PARAMETERS:
+        kwargs["is_causal"] = True
+    if "enable_gqa" in _VARLEN_PARAMETERS:
         kwargs["enable_gqa"] = q.size(1) != k.size(1)
     return varlen_attn(
         q,
