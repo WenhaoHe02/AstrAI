@@ -303,11 +303,20 @@ class GroupedExperts(nn.Module):
 
     @staticmethod
     def _grouped_mm(x: Tensor, weight: Tensor, offsets: Tensor) -> Tensor:
-        grouped_mm = getattr(F, "grouped_mm", None)
-        if grouped_mm is not None and x.is_cuda and x.dtype == torch.bfloat16:
-            return grouped_mm(x, weight.transpose(1, 2), offs=offsets)
-        if hasattr(torch, "_grouped_mm") and x.is_cuda and x.dtype == torch.bfloat16:
-            return torch._grouped_mm(x, weight.transpose(1, 2), offs=offsets)
+        # PyTorch 2.8's grouped GEMM kernels are Hopper-only (CC 9.0).  Calling
+        # them on Blackwell fails at runtime, so B200 uses the cuBLAS-backed
+        # per-expert F.linear fallback below.  Keep the grouped path on H100/H200.
+        grouped_mm_supported = (
+            x.is_cuda
+            and x.dtype == torch.bfloat16
+            and torch.cuda.get_device_capability(x.device) == (9, 0)
+        )
+        if grouped_mm_supported:
+            grouped_mm = getattr(F, "grouped_mm", None)
+            if grouped_mm is not None:
+                return grouped_mm(x, weight.transpose(1, 2), offs=offsets)
+            if hasattr(torch, "_grouped_mm"):
+                return torch._grouped_mm(x, weight.transpose(1, 2), offs=offsets)
 
         # CPU/unsupported-dtype correctness fallback used by unit tests and
         # tiny smoke checks. Production BF16 CUDA runs must take grouped_mm.
