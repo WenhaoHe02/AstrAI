@@ -65,6 +65,7 @@ def test_7b_a1b_gqa_moe_recipe_parameter_count():
     assert config["tie_word_embeddings"] is True
     assert config["expert_parallel_size"] == 1
     assert config["expert_dispatch_backend"] == "torch"
+    assert config["expert_gemm_backend"] == "transformer_engine"
     assert config["num_attention_heads"] // config["num_key_value_heads"] == 4
     assert total == 6_998_099_968
     assert active == 1_052_674_048

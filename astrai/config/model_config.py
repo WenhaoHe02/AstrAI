@@ -61,6 +61,7 @@ class AutoRegressiveLMConfig(BaseModelConfig):
     topk_method: Optional[str] = None
     expert_parallel_size: int = 1
     expert_dispatch_backend: str = "torch"
+    expert_gemm_backend: str = "torch"
     deepep_expert_alignment: int = 1
     deepep_overlap_with_compute: bool = False
     deepep_cpu_sync: bool = True

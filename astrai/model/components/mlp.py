@@ -201,6 +201,7 @@ class GroupedExperts(nn.Module):
         n_experts: int,
         down_init_std: float,
         expert_parallel_size: int = 1,
+        expert_gemm_backend: str = "torch",
         swiglu_backend: str = "torch",
         fused_mlp_gate_up: bool = False,
     ):
@@ -226,6 +227,12 @@ class GroupedExperts(nn.Module):
         self.expert_start = self.expert_parallel_rank * self.n_local_experts
         self.expert_end = self.expert_start + self.n_local_experts
         self.down_init_std = down_init_std
+        if expert_gemm_backend not in ("torch", "transformer_engine"):
+            raise ValueError(
+                "expert_gemm_backend must be 'torch' or 'transformer_engine', got "
+                f"{expert_gemm_backend!r}"
+            )
+        self.expert_gemm_backend = expert_gemm_backend
         if swiglu_backend not in ("torch", "liger"):
             raise ValueError(
                 f"swiglu_backend must be 'torch' or 'liger', got {swiglu_backend!r}"
@@ -233,18 +240,74 @@ class GroupedExperts(nn.Module):
         self.swiglu_backend = swiglu_backend
         self.fused_mlp_gate_up = fused_mlp_gate_up
 
-        if fused_mlp_gate_up:
-            self.up_gate_weight = nn.Parameter(
-                torch.empty(self.n_local_experts, 2 * dim_ffn, dim)
+        if expert_gemm_backend == "transformer_engine":
+            try:
+                from transformer_engine.pytorch import GroupedLinear
+            except ImportError as exc:
+                raise RuntimeError(
+                    "expert_gemm_backend='transformer_engine' requires "
+                    "Transformer Engine with GroupedLinear support"
+                ) from exc
+
+            def up_init(weight: Tensor) -> None:
+                nn.init.normal_(weight, mean=0.0, std=0.02)
+
+            def down_init(weight: Tensor) -> None:
+                nn.init.normal_(weight, mean=0.0, std=down_init_std)
+
+            if fused_mlp_gate_up:
+                self.te_up_gate = GroupedLinear(
+                    self.n_local_experts,
+                    dim,
+                    2 * dim_ffn,
+                    bias=False,
+                    init_method=up_init,
+                    params_dtype=torch.float32,
+                    device="cpu",
+                )
+            else:
+                self.te_up = GroupedLinear(
+                    self.n_local_experts,
+                    dim,
+                    dim_ffn,
+                    bias=False,
+                    init_method=up_init,
+                    params_dtype=torch.float32,
+                    device="cpu",
+                )
+                self.te_gate = GroupedLinear(
+                    self.n_local_experts,
+                    dim,
+                    dim_ffn,
+                    bias=False,
+                    init_method=up_init,
+                    params_dtype=torch.float32,
+                    device="cpu",
+                )
+            self.te_down = GroupedLinear(
+                self.n_local_experts,
+                dim_ffn,
+                dim,
+                bias=False,
+                init_method=down_init,
+                params_dtype=torch.float32,
+                device="cpu",
             )
         else:
-            self.up_weight = nn.Parameter(
-                torch.empty(self.n_local_experts, dim_ffn, dim)
+            if fused_mlp_gate_up:
+                self.up_gate_weight = nn.Parameter(
+                    torch.empty(self.n_local_experts, 2 * dim_ffn, dim)
+                )
+            else:
+                self.up_weight = nn.Parameter(
+                    torch.empty(self.n_local_experts, dim_ffn, dim)
+                )
+                self.gate_weight = nn.Parameter(
+                    torch.empty(self.n_local_experts, dim_ffn, dim)
+                )
+            self.down_weight = nn.Parameter(
+                torch.empty(self.n_local_experts, dim, dim_ffn)
             )
-            self.gate_weight = nn.Parameter(
-                torch.empty(self.n_local_experts, dim_ffn, dim)
-            )
-        self.down_weight = nn.Parameter(torch.empty(self.n_local_experts, dim, dim_ffn))
 
         # FSDP discovers this marker and leaves rank-local expert weights out
         # of data-parallel sharding.  Shared/router/attention parameters still
@@ -252,6 +315,10 @@ class GroupedExperts(nn.Module):
         self._expert_parallel_local = expert_parallel_size > 1
 
     def reset_parameters(self):
+        # Transformer Engine owns and initializes its child GroupedLinear
+        # parameters. Module.apply visits those children before this wrapper.
+        if self.expert_gemm_backend == "transformer_engine":
+            return
         if self.fused_mlp_gate_up:
             nn.init.normal_(self.up_gate_weight, mean=0.0, std=0.02)
         else:
@@ -273,6 +340,49 @@ class GroupedExperts(nn.Module):
         # its contiguous expert slice before FSDP wrapping.
         fused_key = prefix + "up_gate_weight"
         up_key, gate_key = prefix + "up_weight", prefix + "gate_weight"
+        down_key = prefix + "down_weight"
+
+        if self.expert_gemm_backend == "transformer_engine":
+            # Import legacy packed expert tensors into TE's per-GEMM parameter
+            # layout. This permits model-weight continuation across the B200
+            # backend switch; optimizer state is intentionally restarted.
+            if self.fused_mlp_gate_up and fused_key not in state_dict:
+                if up_key in state_dict and gate_key in state_dict:
+                    state_dict[fused_key] = torch.cat(
+                        [state_dict.pop(up_key), state_dict.pop(gate_key)], dim=1
+                    )
+            legacy = [fused_key if self.fused_mlp_gate_up else None, up_key, gate_key]
+            for key in [key for key in legacy if key is not None] + [down_key]:
+                value = state_dict.get(key)
+                if value is not None and value.size(0) == self.n_experts:
+                    state_dict[key] = value[self.expert_start : self.expert_end]
+            if self.fused_mlp_gate_up and fused_key in state_dict:
+                value = state_dict.pop(fused_key)
+                for expert_idx, weight in enumerate(value):
+                    state_dict[prefix + f"te_up_gate.weight{expert_idx}"] = weight
+            elif not self.fused_mlp_gate_up:
+                for source_key, module_name in (
+                    (up_key, "te_up"),
+                    (gate_key, "te_gate"),
+                ):
+                    if source_key in state_dict:
+                        value = state_dict.pop(source_key)
+                        for expert_idx, weight in enumerate(value):
+                            state_dict[prefix + f"{module_name}.weight{expert_idx}"] = weight
+            if down_key in state_dict:
+                value = state_dict.pop(down_key)
+                for expert_idx, weight in enumerate(value):
+                    state_dict[prefix + f"te_down.weight{expert_idx}"] = weight
+            return super()._load_from_state_dict(
+                state_dict,
+                prefix,
+                local_metadata,
+                strict,
+                missing_keys,
+                unexpected_keys,
+                error_msgs,
+            )
+
         if self.fused_mlp_gate_up and fused_key not in state_dict:
             if up_key in state_dict and gate_key in state_dict:
                 state_dict[fused_key] = torch.cat(
@@ -370,6 +480,25 @@ class GroupedExperts(nn.Module):
         offsets: Tensor | None = None,
         host_counts: list[int] | None = None,
     ) -> Tensor:
+        if self.expert_gemm_backend == "transformer_engine":
+            if host_counts is None:
+                host_counts = [int(value) for value in counts.tolist()]
+            if len(host_counts) != self.n_local_experts:
+                raise ValueError("host_counts must have one entry per local expert")
+            if self.fused_mlp_gate_up:
+                up, gate = self.te_up_gate(x, host_counts).split(
+                    self.dim_ffn, dim=-1
+                )
+            else:
+                up = self.te_up(x, host_counts)
+                gate = self.te_gate(x, host_counts)
+            hidden = apply_swiglu(gate, up, self.swiglu_backend)
+            if row_scale is not None:
+                if row_scale.ndim != 1 or row_scale.size(0) != hidden.size(0):
+                    raise ValueError("row_scale must have one value per expert input row")
+                hidden = hidden * row_scale.to(hidden.dtype).unsqueeze(-1)
+            return self.te_down(hidden, host_counts)
+
         if offsets is None:
             offsets = counts.cumsum(0, dtype=torch.int32)
         elif offsets.dtype != torch.int32:
@@ -414,6 +543,7 @@ class DeepSeekMoE(nn.Module):
         n_layers: int = 1,
         expert_parallel_size: int = 1,
         expert_dispatch_backend: str = "torch",
+        expert_gemm_backend: str = "torch",
         deepep_expert_alignment: int = 1,
         deepep_overlap_with_compute: bool = False,
         deepep_cpu_sync: bool = True,
@@ -431,6 +561,7 @@ class DeepSeekMoE(nn.Module):
         self.topk_method = topk_method or "greedy"
         self.expert_parallel_size = expert_parallel_size
         self.expert_dispatch_backend = expert_dispatch_backend
+        self.expert_gemm_backend = expert_gemm_backend
         self.deepep_expert_alignment = deepep_expert_alignment
         self.deepep_overlap_with_compute = deepep_overlap_with_compute
         self.deepep_cpu_sync = deepep_cpu_sync
@@ -450,6 +581,11 @@ class DeepSeekMoE(nn.Module):
             )
         if expert_dispatch_backend == "deepep" and expert_parallel_size == 1:
             raise ValueError("DeepEP dispatch requires expert_parallel_size > 1")
+        if expert_gemm_backend not in ("torch", "transformer_engine"):
+            raise ValueError(
+                "expert_gemm_backend must be 'torch' or 'transformer_engine', got "
+                f"{expert_gemm_backend!r}"
+            )
         if deepep_expert_alignment < 1:
             raise ValueError("deepep_expert_alignment must be positive")
 
@@ -480,6 +616,7 @@ class DeepSeekMoE(nn.Module):
             n_routed_experts,
             down_init_std=down_init_std,
             expert_parallel_size=expert_parallel_size,
+            expert_gemm_backend=expert_gemm_backend,
             swiglu_backend=swiglu_backend,
             fused_mlp_gate_up=fused_mlp_gate_up,
         )
@@ -591,7 +728,14 @@ class DeepSeekMoE(nn.Module):
         order = torch.argsort(expert_idx, stable=True)
         grouped_x = assignment_x[order]
         counts = torch.bincount(expert_idx, minlength=self.n_routed_experts)
-        grouped_out = self.routed_experts(grouped_x, counts)
+        host_counts = None
+        if self.expert_gemm_backend == "transformer_engine":
+            host_counts = [int(value) for value in counts.tolist()]
+        grouped_out = self.routed_experts(
+            grouped_x,
+            counts,
+            host_counts=host_counts,
+        )
         output = torch.empty_like(grouped_out)
         output[order] = grouped_out
         return output

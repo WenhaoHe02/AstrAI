@@ -24,6 +24,7 @@
   "n_activated_experts": 2,
   "expert_parallel_size": 1,
   "expert_dispatch_backend": "torch",
+  "expert_gemm_backend": "transformer_engine",
   "deepep_expert_alignment": 1,
   "deepep_overlap_with_compute": false,
   "deepep_cpu_sync": true,
