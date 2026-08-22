@@ -872,7 +872,11 @@ def train(
         executor_kwargs.update(
             gradient_as_bucket_view=True,
             broadcast_buffers=False,
-            static_graph=True,
+            # PyTorch 2.8's reducer can assert in backward when static-graph
+            # DDP combines tied embeddings with no_sync gradient accumulation.
+            # Dynamic graph mode preserves the same gradients and is stable on
+            # the NVIDIA Blackwell container used by the DP8 recipe.
+            static_graph=False,
             bucket_cap_mb=100,
         )
     elif parallel_mode == "fsdp":
