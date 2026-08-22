@@ -254,7 +254,10 @@ class GQA(nn.Module):
                     cu_seqlens_kv=document_cu_seqlens,
                     max_seqlen_q=document_max_seqlen,
                     max_seqlen_kv=document_max_seqlen,
-                    attn_mask_type="causal",
+                    # Transformer Engine requires a padding-aware mask type
+                    # for packed THD inputs.  cu_seqlens provide the document
+                    # boundaries while the causal suffix preserves LM order.
+                    attn_mask_type="padding_causal",
                 )
                 if attention_output.ndim == 3:
                     attention_output = attention_output.flatten(1)
