@@ -19,6 +19,24 @@ result, decision and rollback. Never report planning as completed work. Do not
 pause for nonessential approval; ask only when permissions, irreversible data
 loss, or a materially ambiguous product decision blocks progress.
 
+## GPU throughput ownership
+
+Argus owns sustained GPU efficiency for every training run. After initialization,
+JIT warmup and checkpoint I/O are excluded, record per-GPU SM utilization,
+memory use, power, step time, global tokens/s, MFU, input wait and rank skew as
+rolling statistics. Treat a five-minute rolling median SM utilization below 80%
+or a persistent slow-rank spread above 10 percentage points as an incident unless
+an identified checkpoint, evaluation or data-stage transition explains it.
+
+For each incident, distinguish input starvation, CPU tokenization, storage I/O,
+host synchronization, DDP/NCCL, attention, expert routing/GEMM, optimizer and
+checkpoint overhead. Apply changes only after exact-shape measurement. The
+primary optimization target is stable global tokens/s and MFU at finite loss,
+healthy routing and complete checkpoints; never inflate utilization by adding
+useless work. Probe micro-batches 16, 20, 24, 28 and 32 in increasing order,
+including first-step optimizer-state allocation and allocator fragmentation,
+and retain at least 10% physical-memory safety margin for the selected setting.
+
 Once stable base pretraining is underway, prepare the Minecraft-agent stages:
 environment integration using public MC-agent projects as references,
 trajectory schema and collection, supervised post-training, preference/reward
