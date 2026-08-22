@@ -3,7 +3,7 @@
   "input": {
     "sections": [
       {
-        "field": "content",
+        "field": "text",
         "action": "train",
         "append_eos": true
       }

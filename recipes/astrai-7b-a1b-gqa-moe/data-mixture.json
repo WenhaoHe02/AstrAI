@@ -23,7 +23,8 @@
   ],
   "selection": {
     "quality_field": "score",
-    "text_field": "content",
+    "source_text_field": "content",
+    "canonical_text_field": "text",
     "source_field": "source",
     "sample_unit": "tokens",
     "preserve_document_boundaries": true,
